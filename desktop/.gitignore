@@ -1,0 +1,4 @@
+# 桌面层构建产物与依赖，不纳入版本管理
+node_modules/
+dist/
+*.log

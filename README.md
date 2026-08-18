@@ -1,3 +1,16 @@
+<!-- ===================================================== -->
+<!--  Fork 定制说明：本仓库是官方 DeepTutor 的 fork       -->
+<!-- ===================================================== -->
+<div align="center">
+
+> **⚠️ 本仓库为 [HKUDS/DeepTutor](https://github.com/HKUDS/DeepTutor) 的 fork + macOS 桌面封装（Desktop Wrapper）。**
+>
+> 官方原版请访问 [github.com/HKUDS/DeepTutor](https://github.com/HKUDS/DeepTutor)。本仓库在官方基础上新增 `desktop/` 桌面封装层（Electron 壳，不改动官方源码），设计说明见 [`DESKTOP_APP_SPEC.md`](DESKTOP_APP_SPEC.md)。官方更新通过 `main` 分支跟随。
+
+---
+
+</div>
+
 <div align="center">
 
 <p align="center"><img src="assets/figs/logo/logo.png" alt="DeepTutor logo" height="56" style="vertical-align: middle;">&nbsp;<img src="assets/figs/logo/banner.png" alt="DeepTutor" height="48" style="vertical-align: middle;"></p>

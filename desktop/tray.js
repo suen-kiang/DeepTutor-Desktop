@@ -10,36 +10,36 @@ const path = require("path");
 let tray = null;
 
 /**
- * 创建菜单栏图标。
- * 使用「模板图标」（纯黑 + 透明），macOS 会自动适配深浅色菜单栏：
- * 浅色菜单栏显示黑色，深色菜单栏自动变白色。
- * 文件名带 Template 后缀 + 代码里 setTemplateImage(true)，双保险。
+ * 加载一个托盘图标。
+ * @param {string} fileName  assets 下的文件名
+ * @param {boolean} asTemplate  是否作为「模板图标」（纯黑，自动适配菜单栏明暗）
+ * @returns {Electron.NativeImage}
  */
-function createTrayIcon() {
-  // 尝试加载 assets 下的图标，没有就用内置生成的
-  const iconPath = path.join(__dirname, "assets", "trayTemplate.png");
-  const fromFile = nativeImage.createFromPath(iconPath);
+function buildIcon(fileName, asTemplate) {
+  const fromFile = nativeImage.createFromPath(path.join(__dirname, "assets", fileName));
   if (!fromFile.isEmpty()) {
-    // 显式标记为模板图标，让 macOS 自动适配深浅色菜单栏
-    fromFile.setTemplateImage(true);
+    if (asTemplate) fromFile.setTemplateImage(true);
     return fromFile;
   }
 
-  // 内置兜底：生成一个 16x16 的简单图标（一个圆点）
-  // 注：真实产品建议提供 trayTemplate.png / trayTemplate@2x.png
+  // 内置兜底：生成一个 16x16 的占位图
+  // 模板图标走纯黑；彩色图标（运行中绿）走 #34C759
   const size = 16;
   const buf = Buffer.alloc(size * size * 4);
+  const R = asTemplate ? 0 : 52;
+  const G = asTemplate ? 0 : 199;
+  const B = asTemplate ? 0 : 89;
   for (let i = 0; i < size * size; i++) {
-    buf[i * 4] = 0;
-    buf[i * 4 + 1] = 0;
-    buf[i * 4 + 2] = 0;
+    buf[i * 4] = R;
+    buf[i * 4 + 1] = G;
+    buf[i * 4 + 2] = B;
     buf[i * 4 + 3] = 255;
   }
   const img = nativeImage.createFromBitmap(buf, {
     width: size,
     height: size,
   });
-  img.setTemplateImage(true);
+  if (asTemplate) img.setTemplateImage(true);
   return img;
 }
 
@@ -52,7 +52,7 @@ function createTrayIcon() {
  *   - isRunning: 返回服务是否在运行（用于动态切换菜单文案）
  */
 function createTray(handlers) {
-  tray = new Tray(createTrayIcon());
+  tray = new Tray(buildIcon("trayTemplate.png", true));
   tray.setToolTip("DeepTutor");
   rebuildMenu(handlers);
   return tray;
@@ -89,10 +89,13 @@ function rebuildMenu(handlers) {
 }
 
 /**
- * 外部（主进程）在服务状态变化时调用，刷新菜单文案。
+ * 外部（主进程）在服务状态变化时调用，刷新菜单文案 + 图标颜色。
+ * 运行中 → 绿色图标；其他 → 黑色模板图标（自动适配菜单栏明暗）。
  */
 function refresh(handlers) {
   if (tray) {
+    const running = handlers.isRunning ? handlers.isRunning() : false;
+    tray.setImage(buildIcon(running ? "trayGreen.png" : "trayTemplate.png", !running));
     rebuildMenu(handlers);
   }
 }

@@ -124,6 +124,8 @@ app.whenReady().then(async () => {
   if (r.ok) {
     // 4. 服务就绪后创建窗口
     windowManager.createWindow();
+    // 服务已 running，托盘图标刷新为绿色
+    trayManager.refresh(trayHandlers());
     log("窗口已创建");
   } else {
     dialog.showErrorBox("DeepTutor", `服务启动失败：${r.message}`);

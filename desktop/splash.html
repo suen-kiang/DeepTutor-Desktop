@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepTutor</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #ffffff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+    /* splash 无交互元素，整页允许拖动窗口 */
+    -webkit-app-region: drag;
+  }
+  .logo {
+    /* 基准尺寸对齐 macOS 启动台图标视觉大小（~84pt） */
+    width: 84px;
+    height: 84px;
+    transform-origin: center center;
+    transform: scale(0.2);
+    /* 第一轮一次性：20%→70%→50%；之后 50%↔70% 往复 */
+    animation:
+      firstBreathe 1.2s cubic-bezier(0.4, 0, 0.2, 1) 1 forwards,
+      loopBreathe  1.6s ease-in-out 1.2s infinite;
+  }
+  @keyframes firstBreathe {
+    0%   { transform: scale(0.2); }
+    50%  { transform: scale(0.7); }
+    100% { transform: scale(0.5); }
+  }
+  @keyframes loopBreathe {
+    0%, 100% { transform: scale(0.5); }
+    50%      { transform: scale(0.7); }
+  }
+  .hint {
+    margin-top: 28px;
+    font: 13px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    color: #8e8e93;
+    opacity: 0.9;
+  }
+</style>
+</head>
+<body>
+  <img class="logo" src="assets/logo.png" alt="DeepTutor">
+  <div class="hint">正在启动 DeepTutor…</div>
+</body>
+</html>

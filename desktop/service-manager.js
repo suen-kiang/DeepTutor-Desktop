@@ -103,10 +103,12 @@ function start() {
     const extraPaths = [
       "/opt/homebrew/bin", // Apple Silicon 的 Homebrew
       "/usr/local/bin", // Intel Mac 的 Homebrew
+      // 用户级 TeX Live（math-animator/Manim 渲染公式需要 latex/xelatex/dvisvgm）
+      path.join(os.homedir(), "texlive", "2026", "bin", "universal-darwin"),
     ];
     const currentPath = env.PATH || "";
     for (const p of extraPaths) {
-      if (!currentPath.split(":").includes(p)) {
+      if (fs.existsSync(p) && !currentPath.split(":").includes(p)) {
         env.PATH = `${p}:${env.PATH}`;
       }
     }

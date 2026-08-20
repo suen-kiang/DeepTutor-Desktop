@@ -264,7 +264,7 @@ def test_list_ima_rejects_missing_credentials(payload: dict) -> None:
     assert "required" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("limit", [0, 21])
+@pytest.mark.parametrize("limit", [0, 51])
 def test_list_ima_validates_official_page_limit(limit: int) -> None:
     with TestClient(_build_app()) as client:
         response = client.post(

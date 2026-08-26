@@ -28,6 +28,7 @@ import FollowupChatComposer from "@/components/quiz/FollowupChatComposer";
 import {
   AskUserOptions,
   extractMessageSegments,
+  leadingTraceEvents,
 } from "@/components/chat/home/AskUserOptions";
 import { StreamingStatus, TraceFlow } from "@/components/chat/home/TracePanels";
 import { useSmoothStreamText } from "@/hooks/useSmoothStreamText";
@@ -323,6 +324,12 @@ function AssistantThreadMessage({
     [message.events],
   );
   const hasInlineAskUser = segments.some((s) => s.kind === "ask_user");
+  // Same split as the main chat surface: rounds that ran after a card
+  // render below it, so this top trace keeps only what came before.
+  const headerTraceEvents = useMemo(
+    () => leadingTraceEvents(message.events, segments),
+    [message.events, segments],
+  );
   // Smooth the trailing-text growth via the shared rAF typewriter so
   // the markdown renderer sees a steadily-growing string instead of
   // bursty deltas. Off when ``isStreaming`` is false — the hook
@@ -331,7 +338,7 @@ function AssistantThreadMessage({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <TraceFlow events={message.events ?? []} isStreaming={isStreaming} />
+      <TraceFlow events={headerTraceEvents} isStreaming={isStreaming} />
       {hasInlineAskUser ? (
         segments.map((seg) =>
           seg.kind === "text" ? (
@@ -343,6 +350,12 @@ function AssistantThreadMessage({
                 <MarkdownRenderer content={seg.text} variant="compact" />
               </div>
             ) : null
+          ) : seg.kind === "trace" ? (
+            <TraceFlow
+              key={seg.key}
+              events={seg.events}
+              isStreaming={isStreaming}
+            />
           ) : (
             <AskUserOptions
               key={seg.key}

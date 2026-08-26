@@ -175,7 +175,7 @@ docker run --rm --name deeptutor \
 
 > **จำเป็นต้อง publish เฉพาะ `3782`** เบราว์เซอร์คุยกับ frontend origin เท่านั้น; Next.js middleware (`web/proxy.ts`) ส่งต่อ `/api/*` และ `/ws/*` ไปยัง FastAPI backend **ภายใน container** การ publish `8001` (`-p 127.0.0.1:8001:8001`) เป็นทางเลือก — มีประโยชน์เฉพาะเมื่อต้องการเรียก API โดยตรงด้วย curl หรือ scripts
 
-เปิด [http://127.0.0.1:3782](http://127.0.0.1:3782) Container จะสร้าง `/app/data/user/settings/*.json` เมื่อบูตครั้งแรก กำหนดค่า model providers จากหน้า Web Settings Config, API keys, logs, ไฟล์ workspace, memory และ knowledge bases จะคงอยู่ใน volume `deeptutor-data`
+เปิด [http://127.0.0.1:3782](http://127.0.0.1:3782) Container จะสร้าง `/app/data/user/settings/*.json` เมื่อบูตครั้งแรก กำหนดค่า model providers จากหน้า Web Settings Config, API keys, logs, ไฟล์ workspace, memory และ knowledge bases จะคงอยู่ใน volume `deeptutor-data` ส่วนเสริมที่เป็นทางเลือกควรอยู่ที่การปรับใช้ ไม่ใช่ใน shell: ตั้งค่า `DEEPTUTOR_EXTRAS` (และ `DEEPTUTOR_APT_PACKAGES` สำหรับ system libraries) แล้ว container ทุกตัวที่เริ่มจากมันจะ apply ส่วนเสริมเหล่านั้นซ้ำโดยอัตโนมัติ ในขณะที่ `docker exec … pip install` จะหายไปเมื่อ `compose down` ครั้งถัดไป
 
 - **พอร์ต host ที่แตกต่าง:** เปลี่ยนด้านซ้ายของการ mapping `-p host:container` แต่ละอัน (เช่น `-p 127.0.0.1:8088:3782`) หากคุณเปลี่ยนพอร์ตฝั่ง container ใน `/app/data/user/settings/system.json` ให้รีสตาร์ทและอัปเดตด้านขวาของการ mapping แต่ละอันให้ตรงกัน
 - **แบบ detached:** เพิ่ม `-d` จากนั้น `docker logs -f deeptutor` เพื่อติดตาม, `docker stop deeptutor` เพื่อหยุด, `docker rm deeptutor` ก่อนนำชื่อมาใช้ซ้ำ Volume `deeptutor-data` จะเก็บการตั้งค่าและ workspace ของคุณข้ามการรีสตาร์ท
@@ -357,6 +357,8 @@ Partners คือเพื่อนถาวรที่มี soul, นโย�
 
 ชั้น channel ที่ขับเคลื่อนด้วย schema สามารถเชื่อมต่อกับแพลตฟอร์ม IM ได้แก่ Feishu, Telegram, Slack, Discord, DingTalk, QQ/NapCat, WeCom, WhatsApp, Zulip, Mattermost, Matrix, Mochat และ Microsoft Teams ขึ้นอยู่กับ extras ที่ติดตั้งและ credentials ที่กำหนดค่า partner ยังสามารถเชื่อมต่อเป็น subagent และปรึกษาได้จาก chat turn ปกติ — ดู **My Agents** ด้านล่าง
 
+เพื่อการตั้งค่าที่รวดเร็วขึ้น หน้า channel ของ Partner สามารถสร้างแอป Feishu/Lark หรือ WeCom AI bot หรือลงชื่อเข้าใช้บัญชี WeChat ส่วนตัว ผ่านการสแกน QR ที่วาดในเบราว์เซอร์แทนที่จะอยู่ใน server log Feishu/Lark จะตรวจจับ account domain และบันทึกผู้ใช้ที่สแกนเป็นผู้ส่งที่ได้รับอนุญาตเริ่มต้น WeCom จะคง allowlist ที่มีอยู่ไว้ และหากไม่มีจะ default เป็นผู้ใช้ทุกคนที่เข้าถึง bot ได้ พร้อมคำเตือน open-access ที่มองเห็นได้ชัดเจน; ฟอร์ม channel แบบ manual ยังคงใช้งานได้หากโปรโตคอลการสแกนของ provider เปลี่ยนไป
+
 </details>
 
 <details>
@@ -366,7 +368,7 @@ Partners คือเพื่อนถาวรที่มี soul, นโย�
 <img src="../../assets/figs/web-1.4.6+/myagents/00-overview.png" alt="DeepTutor workspace My Agents" width="900">
 </div>
 
-My Agents เปลี่ยน agent อื่น ๆ ให้กลายเป็นบริบทสำหรับ DeepTutor และทำสองสิ่งที่แตกต่างกัน **เชื่อมต่อ agent แบบสด** — Claude Code, Codex, Gemini, Kimi, opencode หรือ MiMo Code CLI บนเครื่องของคุณ หรือหนึ่งใน Partners ของคุณ — และปรึกษามันจากภายใน chat turn: DeepTutor จริง ๆ *รัน* agent อื่นและ stream งานเข้าสู่แผง Activity ผ่านเครื่องมือ `consult_subagent` เลือกด้วย Agent chip (หรือพิมพ์ `@`) และตั้งค่าจำนวนรอบที่การปรึกษาอาจทำได้
+My Agents เปลี่ยน agent อื่น ๆ ให้กลายเป็นบริบทสำหรับ DeepTutor และทำสองสิ่งที่แตกต่างกัน **เชื่อมต่อ agent แบบสด** — Claude Code, Codex, Gemini, Antigravity, Kimi, opencode หรือ MiMo Code CLI บนเครื่องของคุณ หรือหนึ่งใน Partners ของคุณ — และปรึกษามันจากภายใน chat turn: DeepTutor จริง ๆ *รัน* agent อื่นและ stream งานเข้าสู่แผง Activity ผ่านเครื่องมือ `consult_subagent` เลือกด้วย Agent chip (หรือพิมพ์ `@`) และตั้งค่าจำนวนรอบที่การปรึกษาอาจทำได้
 
 <div align="center">
 <img src="../../assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="การปรึกษา subagent Claude Code แบบสด" width="900">
@@ -427,7 +429,7 @@ Knowledge bases คือคอลเลกชันเอกสารที่�
 <img src="../../assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="สร้าง knowledge base" width="900">
 </div>
 
-เมื่อสร้าง KB คุณ **สร้างใหม่** (อัพโหลดเอกสารและสร้าง index ใหม่) หรือ **เชื่อมโยงที่มีอยู่** (นำ index ที่สร้างไว้มาใช้ซ้ำ อ่านในที่โดยไม่ต้อง re-index) การ re-indexing จะเขียน directory `version-N` ใหม่และเก็บอันก่อนหน้าไว้ ดังนั้น index ที่ทำงานอยู่จะไม่ถูกทำลายระหว่างการสร้างใหม่ การแยกวิเคราะห์เอกสาร — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM หรือ LiteParse — ถูกเลือกใน **Settings → Knowledge Base** โดยการดาวน์โหลด local model ปิดโดยค่าเริ่มต้น Docling ยังสามารถรันในโหมด **remote** กับเซิร์ฟเวอร์ Docling Serve ได้ (ไม่ต้องติดตั้ง local หรือใช้ model ใด ๆ) โดยถูกกำหนดค่าผ่าน **Settings → Document Parsing** (`mode=remote`, server base URL และ API key ที่เป็นทางเลือก) หรือผ่าน environment variables `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` Tika ทำงานในโหมด remote เท่านั้นและชี้ไปยังเซิร์ฟเวอร์ Apache Tika (`TIKA_SERVER_URL`) CLI ครอบคลุม lifecycle ด้วย `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default` และ `delete`
+เมื่อสร้าง KB คุณ **สร้างใหม่** (อัพโหลดเอกสารและสร้าง index ใหม่) หรือ **เชื่อมโยงที่มีอยู่** (นำ index ที่สร้างไว้มาใช้ซ้ำ อ่านในที่โดยไม่ต้อง re-index) KB ยังสามารถติดตาม **GitHub sources** ได้ — repo, branch และ glob ที่ Markdown ของมันจะถูกดึงเข้ามาและ re-sync ได้ตามต้องการ ดังนั้นเอกสารที่คุณติดตามจะทันสมัยอยู่เสมอโดยไม่ต้องอัพโหลดใหม่ การ re-indexing จะเขียน directory `version-N` ใหม่และเก็บอันก่อนหน้าไว้ ดังนั้น index ที่ทำงานอยู่จะไม่ถูกทำลายระหว่างการสร้างใหม่ การแยกวิเคราะห์เอกสาร — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM หรือ LiteParse — ถูกเลือกใน **Settings → Knowledge Base** โดยการดาวน์โหลด local model ปิดโดยค่าเริ่มต้น Docling ยังสามารถรันในโหมด **remote** กับเซิร์ฟเวอร์ Docling Serve ได้ (ไม่ต้องติดตั้ง local หรือใช้ model ใด ๆ) โดยถูกกำหนดค่าผ่าน **Settings → Document Parsing** (`mode=remote`, server base URL และ API key ที่เป็นทางเลือก) หรือผ่าน environment variables `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` Tika ทำงานในโหมด remote เท่านั้นและชี้ไปยังเซิร์ฟเวอร์ Apache Tika (`TIKA_SERVER_URL`) CLI ครอบคลุม lifecycle ด้วย `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default` และ `delete`
 
 </details>
 
@@ -573,6 +575,7 @@ repo มี root [`SKILL.md`](../../SKILL.md) — เอกสาร handover ~1
 | คำสั่ง | คำอธิบาย |
 |:---|:---|
 | `deeptutor init` | สร้างหรืออัพเดต `data/user/settings` สำหรับ workspace ปัจจุบัน |
+| `deeptutor doctor [--online]` | ตรวจสอบว่า workspace พร้อมเริ่ม session หรือไม่; `--online` ยังตรวจสอบ model provider ที่กำหนดค่าไว้ด้วย, `--format json` พิมพ์รายงานออกมา |
 | `deeptutor start [--home PATH] [--dev]` | เปิดตัว backend + frontend ด้วยกัน |
 | `deeptutor serve [--port PORT]` | เริ่มเฉพาะ FastAPI backend |
 | `deeptutor run <capability> <message>` | รัน capability turn เดียว (`chat`, `deep_solve`, `deep_question`, `deep_research`, `visualize`, `math_animator`, `mastery_path`); เพิ่ม `--format json` สำหรับ NDJSON output |

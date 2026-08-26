@@ -60,13 +60,14 @@ import {
   AskUserOptions,
   extractAskUserPayload,
   extractMessageSegments,
+  leadingTraceEvents,
 } from "./AskUserOptions";
 import { SetupCredentialCard } from "./SetupCredentialCard";
 import { extractSetupCredential } from "@/lib/setup-signals";
 import ContextReferenceTree, {
   type ContextTreeItem,
 } from "./ContextReferenceTree";
-import { AssistantActivity } from "./TracePanels";
+import { AssistantActivity, NestedTraceFlow } from "./TracePanels";
 import { agentGlyph } from "@/components/agents/agent-icons";
 import { useConnectedAgentKinds } from "@/hooks/useConnectedAgentKinds";
 
@@ -404,6 +405,16 @@ const AssistantMessage = memo(function AssistantMessage({
   const hasInlineAskUser =
     useInlineAskUserSegments &&
     messageSegments.some((seg) => seg.kind === "ask_user");
+  // The activity block is pinned to the top of the message, so it can only
+  // show the rounds that ran BEFORE the first card. What the resumed rounds
+  // reason about renders below the card they answer, in stream order.
+  const headerTraceEvents = useMemo(
+    () =>
+      hasInlineAskUser
+        ? leadingTraceEvents(events, messageSegments)
+        : undefined,
+    [hasInlineAskUser, messageSegments, events],
+  );
 
   const researchInProgress =
     outlineStatus === "researching" || outlineStatus === "done";
@@ -418,6 +429,7 @@ const AssistantMessage = memo(function AssistantMessage({
           still working, collapsed once it settles into the final answer. */}
       <AssistantActivity
         events={events}
+        traceEvents={headerTraceEvents}
         isStreaming={isStreaming}
         content={msg.content}
         className="mb-3"
@@ -501,6 +513,14 @@ const AssistantMessage = memo(function AssistantMessage({
             <AssistantResponse
               key={seg.key}
               content={seg.text}
+              isStreaming={isStreaming}
+            />
+          ) : seg.kind === "trace" ? (
+            // What DeepTutor worked out after the user answered — shown
+            // where they are looking, not back up in the header block.
+            <NestedTraceFlow
+              key={seg.key}
+              events={seg.events}
               isStreaming={isStreaming}
             />
           ) : (

@@ -63,16 +63,18 @@
 
 ### 📦 Releases
 
+> **[2026.8.25]** [v1.5.17](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.17) — Partners each member owns with private conversations and linkable chat accounts, GitHub repos as a knowledge source, **Antigravity CLI**, browser WeChat QR login, and `deeptutor doctor`.
+
 > **[2026.8.22]** [v1.5.16](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.16) — **MarginNote 4** libraries you connect and its add-on fills, Book pages that turn again, and tool-call ids, embeddings and temperature limits that stop breaking behind a gateway.
 
 > **[2026.8.20]** [v1.5.15](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.15) — **PageIndex OSS** you host yourself with reasoning retrieval, a question bank you can finally file into, third-party tool/capability plugins, and **Apache Tika** parsing.
 
 > **[2026.8.19]** [v1.5.14](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.14) — **Immersive Reading**: a document open beside the thread, cited page by page; DeepTutor configures itself from chat; IMA libraries you browse and write to; a notebook console.
 
-> **[2026.8.17]** [v1.5.13](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.13) — Books stream while they compile, track your progress, and export to Markdown; a cost estimate before you approve a spine; and home starter suggestions drawn from memory.
-
 <details>
 <summary><b>Past releases (more than 1 week ago)</b></summary>
+
+> **[2026.8.17]** [v1.5.13](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.13) — Books stream while they compile, track your progress, and export to Markdown; a cost estimate before you approve a spine; and home starter suggestions drawn from memory.
 
 > **[2026.8.13]** [v1.5.12](https://github.com/HKUDS/DeepTutor/releases/tag/v1.5.12) — Web search rebuilt with six new providers (**Doubao**, **Bocha**, **Zhipu**, **Firecrawl**, **Qianfan**, **Aliyun IQS**), a **LiteParse** parsing engine, MCP servers that reconnect on credential change, and **CodeBuddy** + **OrcaRouter**.
 
@@ -331,7 +333,7 @@ docker run --rm --name deeptutor \
 
 > **Only `3782` needs to be published.** The browser talks exclusively to the frontend origin; the Next.js middleware (`web/proxy.ts`) forwards `/api/*` and `/ws/*` to the FastAPI backend **inside the container**. Publishing `8001` (`-p 127.0.0.1:8001:8001`) is optional — handy only for hitting the API directly with curl or scripts.
 
-Open [http://127.0.0.1:3782](http://127.0.0.1:3782). The container creates `/app/data/user/settings/*.json` on first boot; configure model providers from the Web Settings page. Config, API keys, logs, workspace files, memory, and knowledge bases persist in the `deeptutor-data` volume.
+Open [http://127.0.0.1:3782](http://127.0.0.1:3782). The container creates `/app/data/user/settings/*.json` on first boot; configure model providers from the Web Settings page. Config, API keys, logs, workspace files, memory, and knowledge bases persist in the `deeptutor-data` volume. Optional extras belong on the deployment, not in a shell: set `DEEPTUTOR_EXTRAS` (and `DEEPTUTOR_APT_PACKAGES` for system libraries) and every container started from it re-applies them, where a `docker exec … pip install` would be lost at the next `compose down`.
 
 - **Different host ports:** change the left side of each `-p host:container` mapping (e.g. `-p 127.0.0.1:8088:3782`). If you change container-side ports in `/app/data/user/settings/system.json`, restart and update the right side of each mapping to match.
 - **Detached:** add `-d`, then `docker logs -f deeptutor` to follow, `docker stop deeptutor` to stop, `docker rm deeptutor` before reusing the name. The `deeptutor-data` volume keeps your settings and workspace across restarts.
@@ -535,6 +537,8 @@ Each partner has a `SOUL.md`, model selection, channels, tool policy, and assign
 
 The channel layer is schema-driven and can connect to IM platforms such as Feishu, Telegram, Slack, Discord, DingTalk, QQ/NapCat, WeCom, WhatsApp, Zulip, Mattermost, Matrix, Mochat, and Microsoft Teams depending on installed extras and configured credentials. A partner can also be connected as a subagent and consulted from a normal chat turn — see **My Agents** below.
 
+For faster setup, the Partner channel page can create a Feishu/Lark app or WeCom AI bot, or sign a personal WeChat account in, from a QR scan drawn in the browser rather than the server log. Feishu/Lark detects the account domain and saves the scanning user as the initial allowed sender. WeCom keeps an existing allowlist and otherwise defaults to all users who can reach the bot, with a visible open-access warning; the manual channel forms remain available if a provider's scan protocol changes.
+
 </details>
 
 <details>
@@ -544,7 +548,7 @@ The channel layer is schema-driven and can connect to IM platforms such as Feish
 <img src="assets/figs/web-1.4.6+/myagents/00-overview.png" alt="DeepTutor My Agents workspace" width="900">
 </div>
 
-My Agents turns other agents into context for DeepTutor, and does two distinct things. **Connect a live agent** — a Claude Code, Codex, Gemini, Kimi, opencode, or MiMo Code CLI on your machine, or one of your Partners — and consult it from inside a chat turn: DeepTutor actually *runs* the other agent and streams its work into the Activity panel via the `consult_subagent` tool. Select it with the Agent chip (or type `@`), and set how many rounds the consult may take.
+My Agents turns other agents into context for DeepTutor, and does two distinct things. **Connect a live agent** — a Claude Code, Codex, Gemini, Antigravity, Kimi, opencode, or MiMo Code CLI on your machine, or one of your Partners — and consult it from inside a chat turn: DeepTutor actually *runs* the other agent and streams its work into the Activity panel via the `consult_subagent` tool. Select it with the Agent chip (or type `@`), and set how many rounds the consult may take.
 
 <div align="center">
 <img src="assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="Consulting a Claude Code subagent live" width="900">
@@ -605,7 +609,7 @@ Knowledge bases are the document collections behind RAG — they ground Chat tur
 <img src="assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="Create a knowledge base" width="900">
 </div>
 
-Creating a KB, you either **create new** (upload documents and build a fresh index) or **link existing** (reuse an index built elsewhere, read in place with no re-index). Re-indexing writes a new flat `version-N` directory and keeps prior ones, so a working index is never destroyed mid-rebuild. A single document can be removed even from an **error**-state base — dropping a file that failed to parse without a full delete-and-rebuild. Document parsing — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM, or LiteParse — is chosen in **Settings → Knowledge Base**, with local model downloads off by default. Docling can also run in **remote** mode against a Docling Serve server (no local install or models needed), configured via **Settings → Document Parsing** (`mode=remote`, a server base URL, and an optional API key) or the `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` environment variables. Tika is remote-only and points at an Apache Tika server (`TIKA_SERVER_URL`). The CLI mirrors the lifecycle with `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default`, and `delete`.
+Creating a KB, you either **create new** (upload documents and build a fresh index) or **link existing** (reuse an index built elsewhere, read in place with no re-index). A KB can also track **GitHub sources** — a repo, branch, and glob whose Markdown is pulled in and re-synced on demand, so documentation you follow stays current without re-uploading. Re-indexing writes a new flat `version-N` directory and keeps prior ones, so a working index is never destroyed mid-rebuild. A single document can be removed even from an **error**-state base — dropping a file that failed to parse without a full delete-and-rebuild. Document parsing — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM, or LiteParse — is chosen in **Settings → Knowledge Base**, with local model downloads off by default. Docling can also run in **remote** mode against a Docling Serve server (no local install or models needed), configured via **Settings → Document Parsing** (`mode=remote`, a server base URL, and an optional API key) or the `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` environment variables. Tika is remote-only and points at an Apache Tika server (`TIKA_SERVER_URL`). The CLI mirrors the lifecycle with `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default`, and `delete`.
 
 </details>
 
@@ -751,6 +755,7 @@ The repo ships a root [`SKILL.md`](SKILL.md) — a ~150-line handover doc that t
 | Command | Description |
 |:---|:---|
 | `deeptutor init` | Create or update `data/user/settings` for the current workspace |
+| `deeptutor doctor [--online]` | Check whether the workspace is ready to start a session; `--online` also probes the configured model provider, `--format json` prints the report |
 | `deeptutor start [--home PATH] [--dev]` | Launch backend + frontend together; `--dev` enables frontend HMR |
 | `deeptutor serve [--port PORT]` | Start only the FastAPI backend |
 | `deeptutor run <capability> <message>` | Run a single capability turn (`chat`, `deep_solve`, `deep_question`, `deep_research`, `visualize`, `math_animator`, `mastery_path`); add `--format json` for NDJSON output |

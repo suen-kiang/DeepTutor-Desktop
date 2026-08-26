@@ -175,7 +175,7 @@ docker run --rm --name deeptutor \
 
 > **只需发布 `3782` 端口。** 浏览器只与前端源通信；Next.js 中间件（`web/proxy.ts`）在**容器内部**将 `/api/*` 和 `/ws/*` 转发给 FastAPI 后端。发布 `8001`（`-p 127.0.0.1:8001:8001`）是可选的 — 仅在需要用 curl 或脚本直接访问 API 时才有用。
 
-打开 [http://127.0.0.1:3782](http://127.0.0.1:3782)。容器首次启动时会创建 `/app/data/user/settings/*.json`；通过 Web Settings 页面配置模型提供商。配置、API Key、日志、工作区文件、记忆和知识库均持久化在 `deeptutor-data` 卷中。
+打开 [http://127.0.0.1:3782](http://127.0.0.1:3782)。容器首次启动时会创建 `/app/data/user/settings/*.json`；通过 Web Settings 页面配置模型提供商。配置、API Key、日志、工作区文件、记忆和知识库均持久化在 `deeptutor-data` 卷中。可选的额外依赖应配置在部署层面，而不是在 shell 中临时安装：设置 `DEEPTUTOR_EXTRAS`（系统库则用 `DEEPTUTOR_APT_PACKAGES`），由此启动的每个容器都会重新应用这些依赖；而 `docker exec … pip install` 这类临时安装会在下一次 `compose down` 后丢失。
 
 - **不同宿主机端口：** 修改每个 `-p host:container` 映射的左侧（例如 `-p 127.0.0.1:8088:3782`）。如果修改了 `/app/data/user/settings/system.json` 中容器侧的端口，重启并更新映射右侧以匹配。
 - **后台运行：** 添加 `-d`，然后用 `docker logs -f deeptutor` 查看日志，`docker stop deeptutor` 停止，重用名称前执行 `docker rm deeptutor`。`deeptutor-data` 卷在重启之间保留设置和工作区。
@@ -357,6 +357,8 @@ Partners 是拥有独立灵魂、模型策略、知识库、记忆和渠道的�
 
 渠道层基于 Schema 驱动，根据已安装的额外依赖和配置的凭证，可连接飞书、Telegram、Slack、Discord、钉钉、QQ/NapCat、企业微信、WhatsApp、Zulip、Mattermost、Matrix、Mochat 和 Microsoft Teams 等 IM 平台。Partner 也可以作为子智能体连接，并从普通聊天轮次中调用 — 详见下方的**我的智能体**。
 
+为加快配置，Partner 渠道页面可以直接在浏览器中绘制二维码（而非依赖服务器日志）来创建飞书/Lark 应用或企业微信 AI 机器人，或扫码登录个人微信账号。飞书/Lark 会检测账号所属域名，并将扫码用户保存为初始允许的发送者。企业微信会保留已有的白名单，否则默认允许所有能触达机器人的用户使用，并显示明显的开放访问警告；如果某个平台的扫码协议发生变化，手动渠道配置表单仍然可用。
+
 </details>
 
 <details>
@@ -366,7 +368,7 @@ Partners 是拥有独立灵魂、模型策略、知识库、记忆和渠道的�
 <img src="../../assets/figs/web-1.4.6+/myagents/00-overview.png" alt="DeepTutor 我的智能体工作区" width="900">
 </div>
 
-"我的智能体"将其他智能体转化为 DeepTutor 的上下文，具备两种不同的功能。**连接实时智能体** — 连接你机器上的 Claude Code、Codex、Gemini、Kimi、opencode 或 MiMo Code CLI，或你的某个 Partner，在聊天轮次中调用它：DeepTutor 实际上会*运行*另一个智能体，并通过 `consult_subagent` 工具将其工作流式传输到 Activity 面板。通过智能体选项（或输入 `@`）选择它，并设置调用可进行的最大轮数。
+"我的智能体"将其他智能体转化为 DeepTutor 的上下文，具备两种不同的功能。**连接实时智能体** — 连接你机器上的 Claude Code、Codex、Gemini、Antigravity、Kimi、opencode 或 MiMo Code CLI，或你的某个 Partner，在聊天轮次中调用它：DeepTutor 实际上会*运行*另一个智能体，并通过 `consult_subagent` 工具将其工作流式传输到 Activity 面板。通过智能体选项（或输入 `@`）选择它，并设置调用可进行的最大轮数。
 
 <div align="center">
 <img src="../../assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="实时调用 Claude Code 子智能体" width="900">
@@ -427,7 +429,7 @@ Book 将选定的来源转化为交互式**活书** — 不是静态 PDF，而�
 <img src="../../assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="创建知识库" width="900">
 </div>
 
-创建 KB 时，可以选择**新建**（上传文档并构建全新索引）或**链接已有**（复用在其他地方构建的索引，原位读取无需重新索引）。重新索引会写入新的平铺 `version-N` 目录并保留旧版本，因此重建过程中现有索引不会被破坏。即使知识库处于 **error** 状态，也可以单独移除其中一份文档 — 无需完整地删除重建，就能丢弃解析失败的文件。文档解析 — 纯文本、MinerU、Docling、Tika、markitdown、PyMuPDF4LLM 或 LiteParse — 在 **Settings → Knowledge Base** 中选择，本地模型下载默认关闭。Docling 也可以以 **remote** 模式运行，对接 Docling Serve 服务器（无需本地安装或模型），可在 **Settings → Document Parsing** 中配置（`mode=remote`、服务器 Base URL 和可选的 API Key），或通过 `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` 环境变量配置。Tika 仅支持远程模式，需指向 Apache Tika 服务器（`TIKA_SERVER_URL`）。CLI 通过 `deeptutor kb list`、`info`、`create`、`add`、`search`、`set-default` 和 `delete` 来管理完整生命周期。
+创建 KB 时，可以选择**新建**（上传文档并构建全新索引）或**链接已有**（复用在其他地方构建的索引，原位读取无需重新索引）。知识库还可以追踪 **GitHub 来源** — 一个仓库、分支和 glob 匹配模式，其中的 Markdown 文件会被拉取并可按需重新同步，让你关注的文档保持最新，无需重新上传。重新索引会写入新的平铺 `version-N` 目录并保留旧版本，因此重建过程中现有索引不会被破坏。即使知识库处于 **error** 状态，也可以单独移除其中一份文档 — 无需完整地删除重建，就能丢弃解析失败的文件。文档解析 — 纯文本、MinerU、Docling、Tika、markitdown、PyMuPDF4LLM 或 LiteParse — 在 **Settings → Knowledge Base** 中选择，本地模型下载默认关闭。Docling 也可以以 **remote** 模式运行，对接 Docling Serve 服务器（无需本地安装或模型），可在 **Settings → Document Parsing** 中配置（`mode=remote`、服务器 Base URL 和可选的 API Key），或通过 `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` 环境变量配置。Tika 仅支持远程模式，需指向 Apache Tika 服务器（`TIKA_SERVER_URL`）。CLI 通过 `deeptutor kb list`、`info`、`create`、`add`、`search`、`set-default` 和 `delete` 来管理完整生命周期。
 
 </details>
 
@@ -573,6 +575,7 @@ deeptutor run deep_question "就那篇调研测验我" --session "$SID" --format
 | 命令 | 说明 |
 |:---|:---|
 | `deeptutor init` | 为当前工作区创建或更新 `data/user/settings` |
+| `deeptutor doctor [--online]` | 检查工作区是否已准备好启动会话；`--online` 还会探测已配置的模型提供商，`--format json` 打印报告 |
 | `deeptutor start [--home PATH] [--dev]` | 同时启动后端 + 前端；`--dev` 启用前端热更新 |
 | `deeptutor serve [--port PORT]` | 仅启动 FastAPI 后端 |
 | `deeptutor run <capability> <message>` | 运行单次能力对话（`chat`、`deep_solve`、`deep_question`、`deep_research`、`visualize`、`math_animator`、`mastery_path`）；添加 `--format json` 可获得 NDJSON 输出 |

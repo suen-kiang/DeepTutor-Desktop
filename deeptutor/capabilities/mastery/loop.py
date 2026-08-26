@@ -119,6 +119,12 @@ class MasteryLoopCapability:
 
     name = "mastery"
     owned_tools = MASTERY_TOOL_NAMES
+    # Declared to the dispatcher so a switch that shares a round with a write
+    # runs first and the write lands on the path the model switched *to*. Every
+    # call in a round is bound before any of them runs, so without this a
+    # ``mastery_switch`` + ``mastery_build`` round rebuilt the map of the path
+    # the conversation was leaving.
+    rebinding_tools = tuple(_PATH_BINDING_TOOLS)
 
     def is_active(self, context: UnifiedContext) -> bool:
         return bool(context.metadata.get("mastery_mode"))

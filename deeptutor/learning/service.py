@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     from deeptutor.learning.scheduler import SpacedRepetitionScheduler
 
 
+# Long enough for a course title, short enough that a list row stays a row.
+# Matches the cap module and objective names already use.
+_MAX_PATH_NAME_LEN = 200
+
+
 class MasteryInteractionError(RuntimeError):
     """Base error for invalid durable question lifecycle transitions."""
 
@@ -601,11 +606,23 @@ class LearningService:
         modules: list[LearningModule],
         *,
         append: bool = False,
+        name: str = "",
         event_type: str = "path.modules_replaced",
         session_id: str = "",
         turn_id: str = "",
     ) -> LearningProgress:
+        """Install a module set, optionally naming a path that has no name yet.
+
+        ``name`` is applied only when the path is still unnamed, in the same
+        transaction as the modules so a built path is never briefly nameless.
+        Replacing the map deliberately does NOT rename: the map is what the
+        path teaches, the name is which path it is — deriving one from the
+        other is what made a rebuild look like a different course.
+        """
+
         def replace(tx):
+            if name.strip() and not tx.progress.name.strip():
+                tx.progress.name = name.strip()[:_MAX_PATH_NAME_LEN]
             applied_modules = [module.model_copy(deep=True) for module in modules]
             if append:
                 offset = len(tx.progress.modules)
@@ -642,6 +659,26 @@ class LearningService:
             )
 
         progress, _ = self._store.mutate(book_id, replace, create=True)
+        return progress
+
+    def rename_path(self, book_id: str, name: str) -> LearningProgress:
+        """Set (or clear) the learner-facing name of a path.
+
+        Clearing it is meaningful, not a no-op: an empty name hands the path
+        back to the derived display name, which is the only way to undo a
+        rename without inventing a second "auto" flag.
+        """
+        cleaned = str(name or "").strip()[:_MAX_PATH_NAME_LEN]
+
+        def rename(tx):
+            if tx.progress.name == cleaned:
+                return cleaned
+            tx.progress.name = cleaned
+            tx.touch()
+            tx.emit("path.renamed", {"name": cleaned})
+            return cleaned
+
+        progress, _ = self._store.mutate(book_id, rename)
         return progress
 
     def abandon_active_question(self, book_id: str) -> tuple[LearningProgress, bool]:
@@ -823,8 +860,7 @@ class LearningService:
             overviews.append(
                 {
                     "path_id": progress.book_id,
-                    "name": (progress.modules[0].name if progress.modules else "")
-                    or progress.book_id,
+                    "name": policy.path_display_name(progress),
                     "objectives": counts["total"],
                     "mastered": counts["mastered"],
                     "learning": counts["learning"],
@@ -840,6 +876,8 @@ class LearningService:
 
     def list_progress(self) -> dict:
         """Return summary of all book progress with per-book error info."""
+        from deeptutor.learning import policy
+
         logger = logging.getLogger(__name__)
 
         book_ids = self._store.list_all()
@@ -856,14 +894,10 @@ class LearningService:
                 total_mastery = sum(
                     progress.mastery_levels.get(kp_id, 0) for kp_id in current_kp_ids
                 )
-                # Derive display name from first module, fall back to book_id
-                display_name = ""
-                if progress.modules:
-                    display_name = progress.modules[0].name or ""
                 summaries.append(
                     {
                         "book_id": progress.book_id,
-                        "name": display_name or progress.book_id,
+                        "name": policy.path_display_name(progress),
                         "modules_count": len(progress.modules),
                         "kp_count": total_kps,
                         "current_stage": progress.current_stage.value

@@ -14,6 +14,7 @@ from deeptutor.services.config.model_catalog import ModelCatalogService
 from deeptutor.services.skill.service import SkillService
 
 from .audit import log_admin_action
+from .context import get_current_user
 from .grants import load_grant, save_grant
 from .identity import get_user_by_id, list_user_info
 from .knowledge_access import admin_kb_base_dir
@@ -86,11 +87,17 @@ def _admin_skill_summary() -> list[dict[str, Any]]:
 
 
 def _admin_partner_summary() -> list[dict[str, Any]]:
-    """The partners an admin can assign. Partners are process-wide resources
-    anchored at the admin workspace, so this lists them all (identity only — no
-    channel wiring or model selection leaks into the assignable summary)."""
+    """The partners an admin can hand to someone else.
+
+    Admin-managed partners only — the ones with no owner, or that the admin
+    created. A partner someone built for themselves is theirs to share or not;
+    listing it here would let an admin lend out a private companion (and its
+    soul, which people write personally) by a single click. Identity only: no
+    channel wiring or model selection leaks into the assignable summary.
+    """
     from deeptutor.services.partners import get_partner_manager
 
+    admin_id = get_current_user().id
     return [
         {
             "partner_id": str(item.get("partner_id") or ""),
@@ -99,6 +106,7 @@ def _admin_partner_summary() -> list[dict[str, Any]]:
             "emoji": item.get("emoji") or "",
         }
         for item in get_partner_manager().list_partners()
+        if str(item.get("owner_id") or "") in ("", admin_id)
     ]
 
 

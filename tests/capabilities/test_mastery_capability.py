@@ -411,3 +411,61 @@ async def test_recording_tools_refuse_an_unbuilt_path_without_creating_it(tmp_pa
         assert result.success is False
         assert "mastery_paths" in result.content
     assert LearningStore().list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_a_switch_and_a_build_in_one_round_land_on_the_switched_path(tmp_path, monkeypatch):
+    """The regression behind "my paths contaminate each other".
+
+    Every tool call in a round has its arguments bound before any of them runs,
+    so a ``mastery_switch`` + ``mastery_build`` round used to rebuild the map of
+    the path the conversation was *leaving*: the learner edited path B's map and
+    watched path A's map change instead. Driven through the real dispatcher so
+    the ordering contract, not just the tool, is under test.
+    """
+    from deeptutor.core.agentic.tool_dispatch import dispatch_tool_calls
+
+    _use_store_root(monkeypatch, tmp_path)
+    LearningStore().save(_built_path("path-a", name="Path A"))
+    LearningStore().save(_built_path("path-b", name="Path B"))
+
+    context = UnifiedContext(
+        user_message="switch to path B and rebuild its map",
+        session_id="session-1",
+        metadata={"mastery_mode": True, "mastery_path_id": "path-a", "turn_id": "turn-1"},
+    )
+    capability = MasteryLoopCapability()
+    pipeline = AgenticChatPipeline(language="en")
+
+    await dispatch_tool_calls(
+        tool_calls=[
+            {
+                "id": "c1",
+                "name": "mastery_build",
+                "arguments": json.dumps(
+                    {
+                        "mode": "replace",
+                        "modules": [
+                            {
+                                "name": "Rebuilt module",
+                                "knowledge_points": [{"name": "New objective"}],
+                            }
+                        ],
+                    }
+                ),
+            },
+            {"id": "c2", "name": "mastery_switch", "arguments": '{"path_id": "path-b"}'},
+        ],
+        context=context,
+        stream=StreamBus(),
+        source="chat",
+        stage="responding",
+        iteration_index=0,
+        kwarg_augmenter=pipeline._augment_tool_kwargs,
+        rebinding_tools=frozenset(capability.rebinding_tools),
+    )
+
+    store = LearningStore()
+    assert [m.name for m in store.load("path-b").modules] == ["Rebuilt module"]
+    # The path the turn started on is untouched.
+    assert [m.name for m in store.load("path-a").modules] == ["Path A"]

@@ -175,7 +175,7 @@ docker run --rm --name deeptutor \
 
 > **公開が必要なのは`3782`のみです。** ブラウザはフロントエンドオリジンのみと通信し、Next.jsミドルウェア（`web/proxy.ts`）が`/api/*`と`/ws/*`をコンテナ**内部の**FastAPIバックエンドに転送します。`8001`を公開（`-p 127.0.0.1:8001:8001`）するのはオプションで、curlやスクリプトでAPIに直接アクセスする場合にのみ便利です。
 
-[http://127.0.0.1:3782](http://127.0.0.1:3782)を開いてください。コンテナは初回起動時に`/app/data/user/settings/*.json`を作成します。Web Settingsページからモデルプロバイダーを設定してください。設定、APIキー、ログ、ワークスペースファイル、メモリ、知識ベースは`deeptutor-data`ボリュームに永続化されます。
+[http://127.0.0.1:3782](http://127.0.0.1:3782)を開いてください。コンテナは初回起動時に`/app/data/user/settings/*.json`を作成します。Web Settingsページからモデルプロバイダーを設定してください。設定、APIキー、ログ、ワークスペースファイル、メモリ、知識ベースは`deeptutor-data`ボリュームに永続化されます。オプションのエクストラはシェルではなくデプロイメント自体に属します：`DEEPTUTOR_EXTRAS`（システムライブラリには`DEEPTUTOR_APT_PACKAGES`も）を設定すれば、そこから起動するすべてのコンテナがそれらを再適用します。一方`docker exec … pip install`は次の`compose down`で失われてしまいます。
 
 - **異なるホストポート：** 各`-p host:container`マッピングの左側を変更してください（例：`-p 127.0.0.1:8088:3782`）。`/app/data/user/settings/system.json`のコンテナ側ポートを変更する場合は、再起動して各マッピングの右側を一致するよう更新してください。
 - **デタッチ：** `-d`を追加し、`docker logs -f deeptutor`でログを追跡、`docker stop deeptutor`で停止、名前を再利用する前に`docker rm deeptutor`を実行。`deeptutor-data`ボリュームは再起動をまたいで設定とワークスペースを保持します。
@@ -357,6 +357,8 @@ Partnersは独自のソウル、モデルポリシー、ライブラリ、メモ
 
 チャンネル層はスキーマ駆動で、インストール済みエクストラと設定された認証情報に応じて、Feishu、Telegram、Slack、Discord、DingTalk、QQ/NapCat、WeCom、WhatsApp、Zulip、Mattermost、Matrix、Mochat、Microsoft Teamsなどのプラットフォームに接続できます。PartnerはサブエージェントとしてMy Agentsに接続でき、通常のチャットターンから相談できます。詳細は以下の**My Agents**を参照してください。
 
+セットアップを高速化するため、Partnerチャンネルページはサーバーログではなくブラウザに描画されたQRコードのスキャンから、Feishu/Larkアプリの作成、WeCom AIボットの作成、または個人のWeChatアカウントのサインインを行えます。Feishu/Larkはアカウントドメインを検出し、スキャンしたユーザーを初期許可送信者として保存します。WeComは既存の許可リストを保持し、それ以外の場合はボットに到達できるすべてのユーザーをデフォルトで許可します（目に見えるオープンアクセス警告付き）。プロバイダーのスキャンプロトコルが変更された場合に備え、手動のチャンネルフォームも引き続き利用できます。
+
 </details>
 
 <details>
@@ -366,7 +368,7 @@ Partnersは独自のソウル、モデルポリシー、ライブラリ、メモ
 <img src="../../assets/figs/web-1.4.6+/myagents/00-overview.png" alt="DeepTutor My Agentsワークスペース" width="900">
 </div>
 
-My Agentsは他のエージェントをDeepTutorのコンテキストにし、2つの異なることを行います。**ライブエージェントを接続** — マシン上のClaude Code、Codex、Gemini、Kimi、opencode、MiMo CodeいずれかのCLI、またはPartnerの1つ — してチャットターン内から相談できます。DeepTutorは実際に他のエージェントを*実行*し、`consult_subagent`ツールを介してその作業をActivityパネルにストリーミングします。Agentチップ（または`@`入力）で選択し、相談で取れるラウンド数を設定します。
+My Agentsは他のエージェントをDeepTutorのコンテキストにし、2つの異なることを行います。**ライブエージェントを接続** — マシン上のClaude Code、Codex、Gemini、Antigravity、Kimi、opencode、MiMo CodeいずれかのCLI、またはPartnerの1つ — してチャットターン内から相談できます。DeepTutorは実際に他のエージェントを*実行*し、`consult_subagent`ツールを介してその作業をActivityパネルにストリーミングします。Agentチップ（または`@`入力）で選択し、相談で取れるラウンド数を設定します。
 
 <div align="center">
 <img src="../../assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="Claude Codeサブエージェントをライブで相談" width="900">
@@ -427,7 +429,7 @@ Bookは選択したソースをインタラクティブな**生きている本**
 <img src="../../assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="知識ベースの作成" width="900">
 </div>
 
-KBを作成する際は、**新規作成**（ドキュメントをアップロードして新しいインデックスを構築）または**既存をリンク**（再インデックスなしで既に構築されたインデックスを再利用）を選択します。再インデックスは新しいフラットな`version-N`ディレクトリを書き込み、以前のものを保持するため、再構築中に作業中のインデックスが破壊されることはありません。解析に失敗したファイルを完全な削除・再構築なしで取り除けるよう、**error**状態のベースからでも単一のドキュメントを削除できます。ドキュメント解析（Text-only、MinerU、Docling、Tika、markitdown、PyMuPDF4LLM、LiteParse）は**Settings → Knowledge Base**で選択し、ローカルモデルのダウンロードはデフォルトでオフです。Docling は、Docling Serve サーバーに対して**remote**モードで実行することもできます（ローカルインストールやモデルは不要）。この設定は**Settings → Document Parsing**（`mode=remote`、サーバーのベースURL、オプションのAPIキー）または `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` 環境変数で行います。Tikaはリモート専用で、Apache Tikaサーバー（`TIKA_SERVER_URL`）を指定します。CLIは`deeptutor kb list`、`info`、`create`、`add`、`search`、`set-default`、`delete`でライフサイクルをミラーします。
+KBを作成する際は、**新規作成**（ドキュメントをアップロードして新しいインデックスを構築）または**既存をリンク**（再インデックスなしで既に構築されたインデックスを再利用）を選択します。KBは**GitHubソース** — Markdownを取り込みオンデマンドで再同期するリポジトリ・ブランチ・globの組み合わせ — も追跡できるため、フォローしているドキュメントを再アップロードなしで最新の状態に保てます。再インデックスは新しいフラットな`version-N`ディレクトリを書き込み、以前のものを保持するため、再構築中に作業中のインデックスが破壊されることはありません。解析に失敗したファイルを完全な削除・再構築なしで取り除けるよう、**error**状態のベースからでも単一のドキュメントを削除できます。ドキュメント解析（Text-only、MinerU、Docling、Tika、markitdown、PyMuPDF4LLM、LiteParse）は**Settings → Knowledge Base**で選択し、ローカルモデルのダウンロードはデフォルトでオフです。Docling は、Docling Serve サーバーに対して**remote**モードで実行することもできます（ローカルインストールやモデルは不要）。この設定は**Settings → Document Parsing**（`mode=remote`、サーバーのベースURL、オプションのAPIキー）または `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` 環境変数で行います。Tikaはリモート専用で、Apache Tikaサーバー（`TIKA_SERVER_URL`）を指定します。CLIは`deeptutor kb list`、`info`、`create`、`add`、`search`、`set-default`、`delete`でライフサイクルをミラーします。
 
 </details>
 
@@ -573,6 +575,7 @@ deeptutor run deep_question "Quiz me on that survey" --session "$SID" --format j
 | コマンド | 説明 |
 |:---|:---|
 | `deeptutor init` | 現在のワークスペースの`data/user/settings`を作成または更新 |
+| `deeptutor doctor [--online]` | ワークスペースがセッションを開始できる状態か確認；`--online`は設定済みのモデルプロバイダーもプローブし、`--format json`はレポートを出力 |
 | `deeptutor start [--home PATH] [--dev]` | バックエンド + フロントエンドを一緒に起動 |
 | `deeptutor serve [--port PORT]` | FastAPIバックエンドのみ起動 |
 | `deeptutor run <capability> <message>` | 単一機能ターンを実行（`chat`、`deep_solve`、`deep_question`、`deep_research`、`visualize`、`math_animator`、`mastery_path`）；`--format json`でNDJSON出力 |

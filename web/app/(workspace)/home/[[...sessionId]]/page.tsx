@@ -80,6 +80,7 @@ import {
 import { classifyFile, isSvgFilename } from "@/lib/doc-attachments";
 import { readChatLaunchIntent } from "@/lib/chat-launch-intent";
 import { useAttachmentLimits } from "@/lib/attachment-limits";
+import { hasPendingAskUser } from "@/lib/ask-user-state";
 import { useChatAutoScroll } from "@/hooks/useChatAutoScroll";
 import { useMeasuredHeight } from "@/hooks/useMeasuredHeight";
 import { useSetupSync } from "@/hooks/useSetupSync";
@@ -1033,6 +1034,25 @@ export default function ChatPage() {
     scrollToBottom("instant");
   }, [scrollToBottom, shouldAutoScrollRef]);
 
+  /* A card waiting on the user is the one thing that MUST be on screen: the
+     turn cannot continue until they act on it. Reading the question that
+     precedes it normally scrolls up, which releases the streaming pin — so a
+     quiz card would appear below the fold, under the composer, and the
+     conversation looked stalled. Re-arm the pin and land on the card. */
+  const awaitingUserReply = hasPendingAskUser(lastMessage?.events);
+  // Read inside ``handleSend`` without adding a dependency that would rebuild
+  // the callback (and so the composer) on every streamed event.
+  const awaitingUserReplyRef = useRef(awaitingUserReply);
+  awaitingUserReplyRef.current = awaitingUserReply;
+  useEffect(() => {
+    if (!awaitingUserReply) return;
+    shouldAutoScrollRef.current = true;
+    // One frame later: the card has to be laid out before the bottom it
+    // defines exists.
+    const frame = requestAnimationFrame(() => scrollToBottom("instant"));
+    return () => cancelAnimationFrame(frame);
+  }, [awaitingUserReply, scrollToBottom, shouldAutoScrollRef]);
+
   const copyAssistantMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
     try {
@@ -1687,6 +1707,14 @@ export default function ChatPage() {
 
   const handleSend = useCallback(
     async (content: string) => {
+      // A turn paused on a question: what the user typed is their answer, not
+      // a new message. Routing it here means the card is one way to answer,
+      // not the only one — and a card that never rendered no longer strands
+      // the learner with a turn they can only cancel.
+      if (awaitingUserReplyRef.current) {
+        if (content.trim()) submitUserReply({ text: content });
+        return;
+      }
       if (
         (!content &&
           !attachments.length &&
@@ -1797,6 +1825,7 @@ export default function ChatPage() {
       shouldAutoScrollRef,
       state.isStreaming,
       subagentBudget,
+      submitUserReply,
       t,
       visualizeConfig,
     ],
@@ -2309,6 +2338,7 @@ export default function ChatPage() {
                 onPersonaSelectorOpenChange={setPersonaSelectorOpen}
                 onToggleMemoryFile={handleToggleMemoryFile}
                 onSend={handleSend}
+                awaitingUserReply={awaitingUserReply}
                 onRemoveAttachment={removeAttachment}
                 onPreviewAttachment={handlePreviewPendingAttachment}
                 onRemoveHistory={handleRemoveHistory}

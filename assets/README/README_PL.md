@@ -175,7 +175,7 @@ docker run --rm --name deeptutor \
 
 > **Tylko `3782` musi być opublikowane.** Przeglądarka komunikuje się wyłącznie z serwerem frontendu; middleware Next.js (`web/proxy.ts`) przekazuje `/api/*` i `/ws/*` do backendu FastAPI **wewnątrz kontenera**. Opublikowanie `8001` (`-p 127.0.0.1:8001:8001`) jest opcjonalne — przydatne tylko do bezpośredniego uderzania w API z curl lub skryptów.
 
-Otwórz [http://127.0.0.1:3782](http://127.0.0.1:3782). Kontener tworzy `/app/data/user/settings/*.json` przy pierwszym uruchomieniu; skonfiguruj dostawców modeli ze strony Web Settings. Konfiguracja, klucze API, dzienniki, pliki obszaru roboczego, pamięć i bazy wiedzy są przechowywane w woluminie `deeptutor-data`.
+Otwórz [http://127.0.0.1:3782](http://127.0.0.1:3782). Kontener tworzy `/app/data/user/settings/*.json` przy pierwszym uruchomieniu; skonfiguruj dostawców modeli ze strony Web Settings. Konfiguracja, klucze API, dzienniki, pliki obszaru roboczego, pamięć i bazy wiedzy są przechowywane w woluminie `deeptutor-data`. Opcjonalne dodatki należą do wdrożenia, nie do powłoki: ustaw `DEEPTUTOR_EXTRAS` (oraz `DEEPTUTOR_APT_PACKAGES` dla bibliotek systemowych), a każdy kontener uruchomiony z tego wdrożenia ponownie je zastosuje, podczas gdy `docker exec … pip install` zostałby utracony przy kolejnym `compose down`.
 
 - **Różne porty hosta:** zmień lewą stronę każdego mapowania `-p host:kontener` (np. `-p 127.0.0.1:8088:3782`). Jeśli zmienisz porty po stronie kontenera w `/app/data/user/settings/system.json`, uruchom ponownie i zaktualizuj prawą stronę każdego mapowania, aby pasowała.
 - **Odłączony:** dodaj `-d`, następnie `docker logs -f deeptutor`, aby śledzić, `docker stop deeptutor`, aby zatrzymać, `docker rm deeptutor` przed ponownym użyciem nazwy. Wolumin `deeptutor-data` przechowuje ustawienia i obszar roboczy między restartami.
@@ -357,6 +357,8 @@ Każdy partner ma `SOUL.md`, wybór modelu, kanały, politykę narzędzi i przyp
 
 Warstwa kanałów jest sterowana schematem i może łączyć się z platformami IM takimi jak Feishu, Telegram, Slack, Discord, DingTalk, QQ/NapCat, WeCom, WhatsApp, Zulip, Mattermost, Matrix, Mochat i Microsoft Teams w zależności od zainstalowanych dodatków i skonfigurowanych danych uwierzytelniających. Partner może być również podłączony jako subagent i konsultowany z normalnej tury czatu — patrz **My Agents** poniżej.
 
+Dla szybszej konfiguracji strona kanału Partner może utworzyć aplikację Feishu/Lark lub bota AI WeCom, albo zalogować osobiste konto WeChat, na podstawie kodu QR narysowanego w przeglądarce zamiast w dzienniku serwera. Feishu/Lark wykrywa domenę konta i zapisuje skanującego użytkownika jako początkowego dozwolonego nadawcę. WeCom zachowuje istniejącą listę dozwolonych, a w przeciwnym razie domyślnie zezwala wszystkim użytkownikom, którzy mogą dotrzeć do bota, z widocznym ostrzeżeniem o otwartym dostępie; ręczne formularze kanałów pozostają dostępne, jeśli protokół skanowania dostawcy się zmieni.
+
 </details>
 
 <details>
@@ -366,7 +368,7 @@ Warstwa kanałów jest sterowana schematem i może łączyć się z platformami 
 <img src="../../assets/figs/web-1.4.6+/myagents/00-overview.png" alt="Obszar roboczy My Agents DeepTutor" width="900">
 </div>
 
-My Agents zamienia innych agentów w kontekst dla DeepTutor i wykonuje dwie odrębne rzeczy. **Połącz żywego agenta** — CLI Claude Code, Codex, Gemini, Kimi, opencode lub MiMo Code na twoim komputerze, lub jednego z twoich Partners — i konsultuj go z wnętrza tury czatu: DeepTutor faktycznie *uruchamia* drugiego agenta i strumieniuje jego pracę do panelu Activity przez narzędzie `consult_subagent`. Wybierz go chipem Agent (lub wpisz `@`) i ustaw ile rund może trwać konsultacja.
+My Agents zamienia innych agentów w kontekst dla DeepTutor i wykonuje dwie odrębne rzeczy. **Połącz żywego agenta** — CLI Claude Code, Codex, Gemini, Antigravity, Kimi, opencode lub MiMo Code na twoim komputerze, lub jednego z twoich Partners — i konsultuj go z wnętrza tury czatu: DeepTutor faktycznie *uruchamia* drugiego agenta i strumieniuje jego pracę do panelu Activity przez narzędzie `consult_subagent`. Wybierz go chipem Agent (lub wpisz `@`) i ustaw ile rund może trwać konsultacja.
 
 <div align="center">
 <img src="../../assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="Konsultowanie subagenta Claude Code na żywo" width="900">
@@ -427,7 +429,7 @@ Bazy wiedzy to kolekcje dokumentów za RAG — ugruntowują tury Chat, edycje Co
 <img src="../../assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="Tworzenie bazy wiedzy" width="900">
 </div>
 
-Tworząc KB, albo **tworzysz nową** (przesyłasz dokumenty i budujesz świeży indeks) albo **łączysz istniejącą** (ponownie używasz indeksu zbudowanego gdzie indziej, czytasz w miejscu bez ponownego indeksowania). Ponowne indeksowanie zapisuje nowy płaski katalog `version-N` i zachowuje poprzednie, więc działający indeks nigdy nie jest niszczony w trakcie przebudowy. Pojedynczy dokument można usunąć nawet z bazy w stanie **błędu** — usuwając plik, który nie sparsował się poprawnie, bez pełnego usuwania i przebudowy. Parsowanie dokumentów — Tylko tekst, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM lub LiteParse — jest wybierane w **Settings → Knowledge Base**, z domyślnie wyłączonymi pobieraniami lokalnego modelu. Docling może też działać w trybie **zdalnym** względem serwera Docling Serve (bez lokalnej instalacji czy modeli), konfigurowanym przez **Settings → Document Parsing** (`mode=remote`, bazowy URL serwera i opcjonalny klucz API) lub zmienne środowiskowe `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN`. Tika jest wyłącznie zdalna i wskazuje na serwer Apache Tika (`TIKA_SERVER_URL`). CLI odzwierciedla cykl życia za pomocą `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default` i `delete`.
+Tworząc KB, albo **tworzysz nową** (przesyłasz dokumenty i budujesz świeży indeks) albo **łączysz istniejącą** (ponownie używasz indeksu zbudowanego gdzie indziej, czytasz w miejscu bez ponownego indeksowania). Baza wiedzy może też śledzić **źródła GitHub** — repozytorium, gałąź i wzorzec glob, których Markdown jest pobierany i ponownie synchronizowany na żądanie, dzięki czemu dokumentacja którą śledzisz pozostaje aktualna bez ponownego przesyłania. Ponowne indeksowanie zapisuje nowy płaski katalog `version-N` i zachowuje poprzednie, więc działający indeks nigdy nie jest niszczony w trakcie przebudowy. Pojedynczy dokument można usunąć nawet z bazy w stanie **błędu** — usuwając plik, który nie sparsował się poprawnie, bez pełnego usuwania i przebudowy. Parsowanie dokumentów — Tylko tekst, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM lub LiteParse — jest wybierane w **Settings → Knowledge Base**, z domyślnie wyłączonymi pobieraniami lokalnego modelu. Docling może też działać w trybie **zdalnym** względem serwera Docling Serve (bez lokalnej instalacji czy modeli), konfigurowanym przez **Settings → Document Parsing** (`mode=remote`, bazowy URL serwera i opcjonalny klucz API) lub zmienne środowiskowe `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN`. Tika jest wyłącznie zdalna i wskazuje na serwer Apache Tika (`TIKA_SERVER_URL`). CLI odzwierciedla cykl życia za pomocą `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default` i `delete`.
 
 </details>
 
@@ -573,6 +575,7 @@ Repozytorium zawiera główny [`SKILL.md`](../../SKILL.md) — około 150-liniow
 | Polecenie | Opis |
 |:---|:---|
 | `deeptutor init` | Utwórz lub zaktualizuj `data/user/settings` dla bieżącego obszaru roboczego |
+| `deeptutor doctor [--online]` | Sprawdź, czy obszar roboczy jest gotowy do rozpoczęcia sesji; `--online` sprawdza też skonfigurowanego dostawcę modelu, `--format json` wypisuje raport |
 | `deeptutor start [--home PATH] [--dev]` | Uruchom backend + frontend razem |
 | `deeptutor serve [--port PORT]` | Uruchom tylko backend FastAPI |
 | `deeptutor run <capability> <message>` | Uruchom jedną turę możliwości (`chat`, `deep_solve`, `deep_question`, `deep_research`, `visualize`, `math_animator`, `mastery_path`); dodaj `--format json` dla wyjścia NDJSON |

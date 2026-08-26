@@ -88,6 +88,228 @@ class TestCreate:
         assert _create(client, partner_id="bob", name="Bob", mcp_tools=None).status_code == 200
         assert client.get("/api/v1/partners/bob").json()["mcp_tools"] is None
 
+
+class TestChannelOnboarding:
+    def _install_feishu_manager(self, monkeypatch) -> None:
+        from urllib.parse import parse_qs
+
+        from deeptutor.api.routers import partners as router_mod
+        from deeptutor.services.partners.channel_onboarding import (
+            ChannelOnboardingManager,
+        )
+
+        polls = [
+            {"error": "authorization_pending"},
+            {
+                "client_id": "cli_app",
+                "client_secret": "app_secret",
+                "user_info": {"open_id": "ou_scanner"},
+            },
+        ]
+
+        def handler(request):
+            if request.url.path != "/oauth/v1/app/registration":
+                raise AssertionError(request.url)
+            form = {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
+            if form["action"] == "init":
+                return __import__("httpx").Response(
+                    200, json={"supported_auth_methods": ["client_secret"]}
+                )
+            if form["action"] == "begin":
+                return __import__("httpx").Response(
+                    200,
+                    json={
+                        "device_code": "device-code",
+                        "verification_uri_complete": "https://accounts.feishu.cn/scan",
+                        "interval": 1,
+                        "expire_in": 60,
+                    },
+                )
+            return __import__("httpx").Response(400, json=polls.pop(0))
+
+        transport = __import__("httpx").MockTransport(handler)
+        manager = ChannelOnboardingManager(
+            client_factory=lambda: __import__("httpx").AsyncClient(transport=transport)
+        )
+        monkeypatch.setattr(router_mod, "get_channel_onboarding_manager", lambda: manager)
+
+    def test_start_status_apply_and_terminal_apply(self, client, monkeypatch, isolated_root):
+        self._install_feishu_manager(monkeypatch)
+        assert _create(client).status_code == 200
+
+        started = client.post(
+            "/api/v1/partners/ada/channel-onboarding/start",
+            json={"channel": "feishu"},
+        )
+        assert started.status_code == 200
+        body = started.json()
+        assert body["status"] == "pending_scan"
+        assert "device-code" not in json.dumps(body)
+
+        session_id = body["session_id"]
+        assert (
+            client.get(f"/api/v1/partners/ada/channel-onboarding/{session_id}").json()["status"]
+            == "pending_scan"
+        )
+        ready = client.get(f"/api/v1/partners/ada/channel-onboarding/{session_id}").json()
+        assert ready["status"] == "ready"
+
+        applied = client.post(f"/api/v1/partners/ada/channel-onboarding/{session_id}/apply")
+        assert applied.status_code == 200
+        assert applied.json()["channels"]["feishu"]["app_secret"] == "***"
+
+        config = yaml.safe_load((isolated_root / "partners" / "ada" / "config.yaml").read_text())
+        assert config["channels"]["feishu"]["app_secret"] == "app_secret"
+        assert config["channels"]["feishu"]["allow_from"] == ["ou_scanner"]
+
+        repeat = client.post(f"/api/v1/partners/ada/channel-onboarding/{session_id}/apply")
+        assert repeat.status_code == 409
+
+    def test_onboarding_errors_and_scope(self, client, monkeypatch):
+        self._install_feishu_manager(monkeypatch)
+        assert _create(client).status_code == 200
+
+        missing = client.post(
+            "/api/v1/partners/ghost/channel-onboarding/start",
+            json={"channel": "feishu"},
+        )
+        assert missing.status_code == 404
+
+        invalid = client.post(
+            "/api/v1/partners/ada/channel-onboarding/start",
+            json={"channel": "telegram"},
+        )
+        assert invalid.status_code == 422
+
+        started = client.post(
+            "/api/v1/partners/ada/channel-onboarding/start",
+            json={"channel": "feishu"},
+        ).json()
+        assert (
+            client.get(
+                f"/api/v1/partners/bob/channel-onboarding/{started['session_id']}"
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get("/api/v1/partners/ada/channel-onboarding/not-a-session").status_code == 404
+        )
+        not_ready = client.post(
+            f"/api/v1/partners/ada/channel-onboarding/{started['session_id']}/apply"
+        )
+        assert not_ready.status_code == 409
+
+        cancelled = client.delete(
+            f"/api/v1/partners/ada/channel-onboarding/{started['session_id']}"
+        )
+        assert cancelled.json()["status"] == "cancelled"
+
+    def test_onboarding_routes_carry_the_partner_manage_gate(self, monkeypatch):
+        """The real app must gate the onboarding routes on *manage*, not just auth.
+
+        These routes write a channel bot token into the partner's config, so
+        they belong to whoever may configure the partner — its owner or an
+        admin — never to any signed-in account that knows the id. Partners
+        stopped being a blanket admin resource in v1.5.17: ``main.py`` mounts
+        the router under ``_auth`` and each route declares ``_USABLE`` or
+        ``_MANAGEABLE`` for the partner it names. That per-route declaration is
+        easy to forget on a new route, and this is what notices.
+
+        The ``client`` fixture above mounts the partners router *without* those
+        dependencies so the endpoint tests can drive it directly, so nothing
+        else in this file would notice if the gate went missing.
+
+        Asserted by sending a valid **non-admin** token, rather than by
+        inspecting ``app.routes``: FastAPI 0.141 stopped flattening
+        ``include_router`` into the parent app (it keeps the sub-router nested
+        behind ``include_context``), so every structural assertion available
+        here holds on only one side of this project's own ``fastapi>=0.100.0``
+        range. A response code does not care how the router is represented.
+
+        The body is deliberately invalid, which is what makes the assertion
+        sharp. A gated route rejects the caller in a dependency, before the
+        body is ever validated — 404 when the partner is unknown *or* invisible
+        (``usable_partner`` answers both alike so ids cannot be enumerated),
+        403 when it is visible but not theirs. An **ungated** route would reach
+        body validation and answer 422, and an unauthenticated request would
+        not discriminate at all: ``require_auth`` alone answers 401, so a route
+        that had lost its partner gate would still look protected.
+        """
+        from deeptutor.api import main as api_main
+        from deeptutor.api.routers import auth as auth_module
+        from deeptutor.api.routers import partners as partners_module
+        from deeptutor.services import auth as auth_service
+
+        assert any(
+            route.path == "/{partner_id}/channel-onboarding/start"
+            for route in partners_module.router.routes
+        )
+
+        # The gates wave everything through when auth is disabled, which is the
+        # default in tests — turn it on so they are observable.
+        monkeypatch.setattr(auth_module, "AUTH_ENABLED", True)
+        # ``decode_token`` refuses every token when no secret is configured,
+        # which is the state of a bare test environment — without this the
+        # request would 401 and the assertion below could not tell a gated
+        # route from a merely authenticated one.
+        monkeypatch.setattr(auth_service, "AUTH_SECRET", "test-secret")
+        monkeypatch.setattr(auth_service, "POCKETBASE_ENABLED", False)
+        token = auth_service.create_token("not-an-admin", role="user", user_id="u-1")
+        # No context manager: this must not run the app's lifespan.
+        client = TestClient(api_main.app)
+        response = client.post(
+            "/api/v1/partners/no-such-partner/channel-onboarding/start",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code in (403, 404), (
+            "onboarding start is not manage-gated (a role=user token got "
+            f"{response.status_code}; 422 means the request reached body validation, "
+            "so the route is mounted without _MANAGEABLE)"
+        )
+
+    def test_every_route_naming_a_partner_declares_its_rights(self):
+        """No ``{partner_id}`` route may be left to the router's bare ``_auth``.
+
+        The test above cannot tell ``_USABLE`` from ``_MANAGEABLE``: both
+        answer an outsider with 404. This one can, and it sweeps the whole
+        router rather than the routes someone remembered to test — which is
+        the shape the mistake actually takes. When partners stopped being
+        admin-only, six credential routes kept the ``_auth``-only mount they
+        had inherited from the blanket gate, and any signed-in account could
+        write a channel bot token into anyone's partner.
+
+        Introspection is safe here because it reads the router's *own*
+        ``routes``, not the mounted app's: the FastAPI 0.141 nesting change
+        that rules out asserting against ``api_main.app`` does not touch this.
+        """
+        from deeptutor.api.routers import partners as partners_module
+
+        # Writing or reading channel credentials is configuration, so these
+        # must be manage-gated specifically; use rights are not enough.
+        manage_only = ("/channel-onboarding", "/channels/weixin/qr", "/soul", "/assets")
+
+        ungated: list[str] = []
+        under_gated: list[str] = []
+        for route in partners_module.router.routes:
+            path = getattr(route, "path", "")
+            if "{partner_id}" not in path:
+                continue
+            # The socket cannot run HTTP dependencies; it checks by hand.
+            if not getattr(route, "methods", None):
+                continue
+            names = {
+                getattr(dep.dependency, "__name__", "")
+                for dep in getattr(route, "dependencies", [])
+            }
+            if not names & {"usable_partner", "manageable_partner"}:
+                ungated.append(path)
+            elif any(part in path for part in manage_only) and "manageable_partner" not in names:
+                under_gated.append(path)
+
+        assert not ungated, f"partner routes with no use/manage gate: {ungated}"
+        assert not under_gated, f"configuration routes gated on use, not manage: {under_gated}"
+
     def test_duplicate_id_conflicts(self, client):
         assert _create(client).status_code == 200
         assert _create(client).status_code == 409

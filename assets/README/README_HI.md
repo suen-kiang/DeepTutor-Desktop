@@ -175,7 +175,7 @@ docker run --rm --name deeptutor \
 
 > **केवल `3782` publish करना जरूरी है।** Browser exclusively frontend origin से बात करता है; Next.js middleware (`web/proxy.ts`) **container के अंदर** `/api/*` और `/ws/*` को FastAPI backend पर forward करता है। `8001` publish करना (`-p 127.0.0.1:8001:8001`) optional है — केवल curl या scripts से API directly hit करने के लिए उपयोगी।
 
-[http://127.0.0.1:3782](http://127.0.0.1:3782) खोलें। Container पहले boot पर `/app/data/user/settings/*.json` बनाता है; Web Settings page से model providers configure करें। Config, API keys, logs, workspace files, memory, और knowledge bases `deeptutor-data` volume में persist करते हैं।
+[http://127.0.0.1:3782](http://127.0.0.1:3782) खोलें। Container पहले boot पर `/app/data/user/settings/*.json` बनाता है; Web Settings page से model providers configure करें। Config, API keys, logs, workspace files, memory, और knowledge bases `deeptutor-data` volume में persist करते हैं। वैकल्पिक extras deployment पर belong करते हैं, किसी shell में नहीं: `DEEPTUTOR_EXTRAS` (और system libraries के लिए `DEEPTUTOR_APT_PACKAGES`) set करें, और उससे शुरू होने वाला हर container उन्हें फिर से apply करता है — जबकि एक `docker exec … pip install` अगले `compose down` पर खो जाता है।
 
 - **अलग host ports:** प्रत्येक `-p host:container` mapping के left side को बदलें (जैसे `-p 127.0.0.1:8088:3782`)। अगर आप `/app/data/user/settings/system.json` में container-side ports बदलते हैं, तो restart करें और match करने के लिए प्रत्येक mapping के right side को update करें।
 - **Detached:** `-d` add करें, फिर follow करने के लिए `docker logs -f deeptutor`, stop करने के लिए `docker stop deeptutor`, नाम reuse करने से पहले `docker rm deeptutor`। `deeptutor-data` volume आपकी settings और workspace को restarts के पार रखता है।
@@ -357,6 +357,8 @@ Partners अपनी soul, model policy, library, memory, और channels व�
 
 Channel layer schema-driven है और installed extras और configured credentials के आधार पर Feishu, Telegram, Slack, Discord, DingTalk, QQ/NapCat, WeCom, WhatsApp, Zulip, Mattermost, Matrix, Mochat, और Microsoft Teams जैसे IM platforms से connect हो सकती है। एक partner को subagent के रूप में भी connect किया जा सकता है और normal chat turn से consult किया जा सकता है — नीचे **My Agents** देखें।
 
+तेज़ setup के लिए, Partner channel page एक Feishu/Lark app या WeCom AI bot create कर सकता है, या एक personal WeChat account को sign in करा सकता है, server log की बजाय browser में draw किए गए एक QR scan से। Feishu/Lark account domain detect करता है और scanning user को initial allowed sender के रूप में save करता है। WeCom एक existing allowlist रखता है और अन्यथा bot तक पहुंच सकने वाले सभी users को default करता है, एक visible open-access warning के साथ; अगर किसी provider का scan protocol बदलता है तो manual channel forms उपलब्ध रहते हैं।
+
 </details>
 
 <details>
@@ -366,7 +368,7 @@ Channel layer schema-driven है और installed extras और configured cre
 <img src="../../assets/figs/web-1.4.6+/myagents/00-overview.png" alt="DeepTutor My Agents workspace" width="900">
 </div>
 
-My Agents दूसरे agents को DeepTutor के लिए context बनाता है, और दो अलग काम करता है। **लाइव एजेंट connect करें** — आपकी machine पर एक Claude Code, Codex, Gemini, Kimi, opencode, या MiMo Code CLI, या आपके Partners में से एक — और इसे chat turn के अंदर से consult करें: DeepTutor actually दूसरे agent को *run* करता है और इसके काम को `consult_subagent` tool के जरिए Activity panel में stream करता है। इसे Agent chip से select करें (या `@` type करें), और set करें कि consult कितने rounds ले सकता है।
+My Agents दूसरे agents को DeepTutor के लिए context बनाता है, और दो अलग काम करता है। **लाइव एजेंट connect करें** — आपकी machine पर एक Claude Code, Codex, Gemini, Antigravity, Kimi, opencode, या MiMo Code CLI, या आपके Partners में से एक — और इसे chat turn के अंदर से consult करें: DeepTutor actually दूसरे agent को *run* करता है और इसके काम को `consult_subagent` tool के जरिए Activity panel में stream करता है। इसे Agent chip से select करें (या `@` type करें), और set करें कि consult कितने rounds ले सकता है।
 
 <div align="center">
 <img src="../../assets/figs/web-1.4.6+/home/08-subagent%20demo%20with%20claude%20code.png" alt="Claude Code subagent को live consult करना" width="900">
@@ -427,7 +429,7 @@ Knowledge bases RAG के पीछे document collections हैं — व�
 <img src="../../assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="एक knowledge base बनाएं" width="900">
 </div>
 
-KB बनाते समय, आप either **नया create** करते हैं (documents upload करें और fresh index build करें) या **existing link** करते हैं (कहीं और बना index reuse करें, re-index के बिना in-place पढ़ें)। Re-indexing एक नई flat `version-N` directory लिखता है और prior ones रखता है, इसलिए एक working index rebuild के दौरान कभी destroy नहीं होता। एक single document को **error**-state base से भी remove किया जा सकता है — पूरी delete-and-rebuild के बिना parse होने में failed हुई file को drop करना। Document parsing — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM, या LiteParse — **Settings → Knowledge Base** में choose किया जाता है, local model downloads default रूप से off हैं। Docling को **remote** mode में भी एक Docling Serve server के विरुद्ध चलाया जा सकता है (कोई local install या models की जरूरत नहीं), जिसे **Settings → Document Parsing** (`mode=remote`, एक server base URL, और एक optional API key) या `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` environment variables के जरिए configure किया जाता है। Tika remote-only है और एक Apache Tika server (`TIKA_SERVER_URL`) पर point करता है। CLI lifecycle को `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default`, और `delete` से mirror करता है।
+KB बनाते समय, आप either **नया create** करते हैं (documents upload करें और fresh index build करें) या **existing link** करते हैं (कहीं और बना index reuse करें, re-index के बिना in-place पढ़ें)। एक KB **GitHub sources** को भी track कर सकती है — एक repo, branch, और glob जिसका Markdown pull किया जाता है और demand पर re-sync किया जाता है, इसलिए जो documentation आप follow करते हैं वह re-upload किए बिना current बनी रहती है। Re-indexing एक नई flat `version-N` directory लिखता है और prior ones रखता है, इसलिए एक working index rebuild के दौरान कभी destroy नहीं होता। एक single document को **error**-state base से भी remove किया जा सकता है — पूरी delete-and-rebuild के बिना parse होने में failed हुई file को drop करना। Document parsing — Text-only, MinerU, Docling, Tika, markitdown, PyMuPDF4LLM, या LiteParse — **Settings → Knowledge Base** में choose किया जाता है, local model downloads default रूप से off हैं। Docling को **remote** mode में भी एक Docling Serve server के विरुद्ध चलाया जा सकता है (कोई local install या models की जरूरत नहीं), जिसे **Settings → Document Parsing** (`mode=remote`, एक server base URL, और एक optional API key) या `DOCLING_MODE` / `DOCLING_API_BASE_URL` / `DOCLING_API_TOKEN` environment variables के जरिए configure किया जाता है। Tika remote-only है और एक Apache Tika server (`TIKA_SERVER_URL`) पर point करता है। CLI lifecycle को `deeptutor kb list`, `info`, `create`, `add`, `search`, `set-default`, और `delete` से mirror करता है।
 
 </details>
 
@@ -573,6 +575,7 @@ Repo एक root [`SKILL.md`](../../SKILL.md) ship करता है — ए�
 | Command | विवरण |
 |:---|:---|
 | `deeptutor init` | Current workspace के लिए `data/user/settings` create या update करें |
+| `deeptutor doctor [--online]` | Check करें कि workspace session शुरू करने के लिए ready है या नहीं; `--online` configured model provider को भी probe करता है, `--format json` report print करता है |
 | `deeptutor start [--home PATH] [--dev]` | Backend + frontend को एक साथ launch करें |
 | `deeptutor serve [--port PORT]` | केवल FastAPI backend start करें |
 | `deeptutor run <capability> <message>` | एक single capability turn run करें (`chat`, `deep_solve`, `deep_question`, `deep_research`, `visualize`, `math_animator`, `mastery_path`); NDJSON output के लिए `--format json` add करें |

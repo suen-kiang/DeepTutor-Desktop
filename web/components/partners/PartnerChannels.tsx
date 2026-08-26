@@ -11,6 +11,7 @@ import { Loader2, Save } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { apiFetch, apiUrl } from "@/lib/api";
 import {
+  supportsChannelOnboarding,
   getChannelSchemas,
   type ChannelsSchemaResponse,
 } from "@/lib/partners-api";
@@ -19,7 +20,9 @@ import {
   defaultFor,
   type JsonSchema,
 } from "@/components/partners/schema-form";
+import WeixinQrLogin from "@/components/partners/WeixinQrLogin";
 import ChannelIcon from "@/components/partners/ChannelIcon";
+import ChannelOnboardingPanel from "@/components/partners/ChannelOnboardingPanel";
 
 const LEGACY_GLOBAL_DELIVERY_KEYS = new Set([
   "send_progress",
@@ -104,6 +107,13 @@ export default function PartnerChannels({
     });
     setActiveChannel(enabled ?? names[0] ?? null);
   }, [schemaCatalog, channels, activeChannel]);
+
+  // A confirmed WeChat scan wrote the token into the config server-side;
+  // re-read so the form shows what is actually stored.
+  const onWeixinConnected = useCallback(() => {
+    onToast(t("WeChat connected."));
+    void loadDetail();
+  }, [loadDetail, onToast, t]);
 
   const toggleSecret = useCallback((path: string) => {
     setRevealed((prev) => {
@@ -271,10 +281,29 @@ export default function PartnerChannels({
                 </div>
               ) : (
                 <>
+                  {supportsChannelOnboarding(
+                    activeChannel ?? "",
+                    activeEntry.available,
+                  ) && (
+                    <ChannelOnboardingPanel
+                      partnerId={partnerId}
+                      channel={activeChannel === "wecom" ? "wecom" : "feishu"}
+                      onApplied={loadDetail}
+                      onToast={onToast}
+                    />
+                  )}
                   {(activeEntry.json_schema as JsonSchema).description && (
                     <p className="text-[11px] text-[var(--muted-foreground)]">
                       {(activeEntry.json_schema as JsonSchema).description}
                     </p>
+                  )}
+                  {/* Personal WeChat authenticates by scanning, not by pasting
+                      a secret; the fields below stay as the manual fallback. */}
+                  {activeChannel === "weixin" && partnerId && (
+                    <WeixinQrLogin
+                      partnerId={partnerId}
+                      onConfirmed={onWeixinConnected}
+                    />
                   )}
                   {Object.entries(
                     (activeEntry.json_schema as JsonSchema).properties ?? {},

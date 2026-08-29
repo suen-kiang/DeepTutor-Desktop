@@ -208,7 +208,7 @@ class WeixinChannel(BaseChannel):
         if not state_file.exists():
             return False
         try:
-            data = json.loads(state_file.read_text())
+            data = json.loads(state_file.read_text(encoding="utf-8"))
             if not self.config.token:
                 self._token = data.get("token", "")
             self._get_updates_buf = data.get("get_updates_buf", "")

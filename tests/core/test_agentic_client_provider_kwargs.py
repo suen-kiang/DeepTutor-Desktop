@@ -91,6 +91,30 @@ def test_agentic_kwargs_preserve_legacy_shape_without_binding() -> None:
     assert kwargs == {"temperature": 0.2, "max_tokens": 256}
 
 
+@pytest.mark.parametrize("binding", ["moonshot", "openai", "custom"])
+def test_agentic_kwargs_drop_temperature_for_bare_kimi_k3(binding: str) -> None:
+    kwargs = build_completion_kwargs(
+        temperature=0.2,
+        model="k3",
+        max_tokens=256,
+        binding=binding,
+    )
+
+    assert kwargs == {"max_tokens": 256}
+
+
+@pytest.mark.parametrize("model", ["sk3", "k30", "vendor/k3"])
+def test_short_k3_override_does_not_match_unrelated_models(model: str) -> None:
+    kwargs = build_completion_kwargs(
+        temperature=0.2,
+        model=model,
+        max_tokens=256,
+        binding="moonshot",
+    )
+
+    assert kwargs["temperature"] == pytest.approx(0.2)
+
+
 def test_native_tool_backends_all_have_adapter_builders() -> None:
     # Every tool-gated backend must be adapter-routed, or tool schemas would be
     # attached to a plain AsyncOpenAI client speaking a non-OpenAI wire format.

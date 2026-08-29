@@ -29,7 +29,7 @@ from deeptutor.services.llm.openai_http_client import sanitize_invalid_ssl_env
 from deeptutor.services.llm.reasoning_params import (
     build_openai_compatible_reasoning_kwargs,
 )
-from deeptutor.services.provider_registry import find_by_name
+from deeptutor.services.provider_registry import find_by_name, model_overrides_for
 
 # Providers that don't reliably support OpenAI function-calling. The loop
 # still runs without tool schemas — the model just produces prose.
@@ -318,6 +318,16 @@ def _build_native_provider_adapter(config: LLMClientConfig, spec: Any) -> Any | 
         # Reuse the services provider: it already converts messages, tools,
         # streaming events and token limits for the Responses API.
         return _build_direct_openai_adapter(config, spec)
+    native_web_search_models = {
+        str(name).strip().lower()
+        for name in getattr(spec, "native_web_search_models", ())
+        if str(name).strip()
+    }
+    if model.split("/")[-1] in native_web_search_models and not config.api_version:
+        # DeepSeek's native web search is a Responses-only capability. Route
+        # the supported model through the provider adapter; sibling models
+        # stay on the ordinary Chat Completions client.
+        return _build_direct_openai_adapter(config, spec)
     builder = _NATIVE_ADAPTER_BUILDERS.get(spec.backend)
     return builder(config, spec) if builder else None
 
@@ -379,6 +389,7 @@ class _ProviderOpenAIAdapter:
                             _openai_tool_call(tool_call, index=index)
                             for index, tool_call in enumerate(response.tool_calls or [])
                         ],
+                        provider_specific_fields=response.provider_specific_fields,
                     ),
                     finish_reason=(
                         "tool_calls" if response.tool_calls else response.finish_reason or "stop"
@@ -467,6 +478,7 @@ class _ProviderOpenAIStream:
                         "tool_calls" if response.tool_calls else response.finish_reason or "stop"
                     ),
                     usage=response.usage or None,
+                    provider_specific_fields=response.provider_specific_fields,
                 )
             )
         except Exception as exc:
@@ -499,6 +511,7 @@ def _openai_stream_chunk(
     index: int = 0,
     finish_reason: str | None = None,
     usage: dict[str, int] | None = None,
+    provider_specific_fields: dict[str, Any] | None = None,
 ) -> Any:
     tool_calls = None
     if tool_call is not None:
@@ -508,6 +521,7 @@ def _openai_stream_chunk(
             SimpleNamespace(
                 delta=SimpleNamespace(content=content, tool_calls=tool_calls),
                 finish_reason=finish_reason,
+                provider_specific_fields=provider_specific_fields,
             )
         ],
         usage=usage,
@@ -533,6 +547,14 @@ def build_completion_kwargs(
             reasoning_effort=reasoning_effort,
         )
     )
+    # Apply model-intrinsic overrides last, matching OpenAICompatProvider. A
+    # None value drops the parameter instead of serialising JSON null.
+    spec = find_by_name(binding)
+    for key, value in model_overrides_for(model, spec).items():
+        if value is None:
+            kwargs.pop(key, None)
+        else:
+            kwargs[key] = value
     return kwargs
 
 

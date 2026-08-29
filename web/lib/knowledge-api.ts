@@ -1215,3 +1215,114 @@ export async function syncGitHubSources(
   const body = await res.json();
   return (body.results ?? []) as GitHubSyncResult[];
 }
+
+// ── Web sources ──────────────────────────────────────────────────────
+
+export interface WebSource {
+  id: string;
+  url: string;
+  max_depth: number;
+  max_pages: number;
+  enabled: boolean;
+  page_count: number;
+  last_synced_at: string;
+  last_sync_status: string;
+  last_sync_error: string | null;
+  added_at: string;
+}
+
+export interface AddWebSourcePayload {
+  url: string;
+  max_depth?: number;
+  max_pages?: number;
+}
+
+export interface WebSyncSourceResult {
+  source_id: string;
+  url: string;
+  ok: boolean;
+  page_count: number;
+  pages_added: number;
+  pages_updated: number;
+  pages_removed: number;
+  pages_unchanged: number;
+  error: string | null;
+}
+
+export interface WebSyncResult {
+  ok: boolean;
+  message: string;
+  results: WebSyncSourceResult[];
+}
+
+export async function listWebSources(
+  kbName: string,
+  options?: { signal?: AbortSignal },
+): Promise<WebSource[]> {
+  const res = await apiFetch(
+    apiUrl(`/api/v1/knowledge/${encodeURIComponent(kbName)}/web-sources`),
+    { signal: options?.signal },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, `Failed to list web sources (${res.status})`),
+    );
+  }
+  return (await res.json()) as WebSource[];
+}
+
+export async function addWebSource(
+  kbName: string,
+  payload: AddWebSourcePayload,
+): Promise<WebSource> {
+  const res = await apiFetch(
+    apiUrl(`/api/v1/knowledge/${encodeURIComponent(kbName)}/web-source`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: payload.url,
+        max_depth: payload.max_depth ?? 3,
+        max_pages: payload.max_pages ?? 200,
+      }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, `Failed to add web source (${res.status})`),
+    );
+  }
+  invalidateKnowledgeCaches();
+  return (await res.json()) as WebSource;
+}
+
+export async function removeWebSource(
+  kbName: string,
+  sourceId: string,
+): Promise<void> {
+  const res = await apiFetch(
+    apiUrl(
+      `/api/v1/knowledge/${encodeURIComponent(kbName)}/web-source/${encodeURIComponent(sourceId)}`,
+    ),
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, `Failed to remove web source (${res.status})`),
+    );
+  }
+  invalidateKnowledgeCaches();
+}
+
+export async function syncWebSources(kbName: string): Promise<WebSyncResult> {
+  const res = await apiFetch(
+    apiUrl(`/api/v1/knowledge/${encodeURIComponent(kbName)}/sync-web`),
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, `Web sync failed (${res.status})`),
+    );
+  }
+  return (await res.json()) as WebSyncResult;
+}

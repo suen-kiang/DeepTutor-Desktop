@@ -32,6 +32,7 @@ _CONTEXT_WINDOW_KEYS = (
     "max_prompt_tokens",
     "max_model_len",
     "max_sequence_length",
+    "n_ctx",
 )
 
 _KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (

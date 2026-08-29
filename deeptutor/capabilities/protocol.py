@@ -84,6 +84,12 @@ class LoopCapability(Protocol):
     a ``getattr`` default, like ``pre_loop``). The dispatcher runs them before
     the round's other calls and re-binds those calls afterwards, so a switch
     and a write issued in the same round cannot land on different targets.
+
+    A capability MAY also define ``finish_instruction(context, final_text)``.
+    It is called after a tool-less LLM round and may return a short protocol
+    instruction when that round must not finalize the turn. The answer loop
+    gives the model one additional round with tools still mounted; capability
+    implementations are responsible for keeping the check narrow and bounded.
     """
 
     name: str

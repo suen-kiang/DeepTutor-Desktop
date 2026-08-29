@@ -1,5 +1,6 @@
 import { apiFetch, apiUrl, wsUrl } from "@/lib/api";
 import {
+  BookSocketOperationError,
   runBookSocketOperation,
   type BookWsEvent,
 } from "@/lib/book-ws-operation";
@@ -14,9 +15,22 @@ import type {
   Progress,
   Spine,
   Block,
+  GenerationSummary,
 } from "@/lib/book-types";
 
 const BASE = "/api/v1/book";
+
+export class BookApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly currentRevision?: number,
+  ) {
+    super(message);
+    this.name = "BookApiError";
+  }
+}
 
 function requestOverSocket<T extends BookWsEvent>(
   message: BookWsEvent,
@@ -27,6 +41,16 @@ function requestOverSocket<T extends BookWsEvent>(
     message,
     resultType,
     onEvent,
+  }).catch((error) => {
+    if (error instanceof BookSocketOperationError && error.status) {
+      throw new BookApiError(
+        error.message,
+        error.status,
+        error.code,
+        error.currentRevision,
+      );
+    }
+    throw error;
   });
 }
 
@@ -37,13 +61,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let detail: string;
+    let code: string | undefined;
+    let currentRevision: number | undefined;
     try {
       const data = await res.json();
-      detail = (data && (data.detail || data.message)) || res.statusText;
+      const raw = data && (data.detail || data.message);
+      if (raw && typeof raw === "object") {
+        detail = String(raw.message || raw.code || res.statusText);
+        code = raw.code ? String(raw.code) : undefined;
+        currentRevision =
+          typeof raw.current_revision === "number"
+            ? raw.current_revision
+            : undefined;
+      } else {
+        detail = String(raw || res.statusText);
+      }
     } catch {
       detail = res.statusText;
     }
-    throw new Error(`book api ${path} → ${res.status}: ${detail}`);
+    throw new BookApiError(
+      `book api ${path} → ${res.status}: ${detail}`,
+      res.status,
+      code,
+      currentRevision,
+    );
   }
   return (await res.json()) as T;
 }
@@ -66,7 +107,7 @@ export interface EstimateBasis {
 }
 
 export const bookApi = {
-  list: () => request<{ books: Book[] }>("/books"),
+  list: () => request<{ books: Book[]; can_create: boolean }>("/books"),
 
   /**
    * Cost of one chapter of each content type, at a given depth.
@@ -115,30 +156,52 @@ export const bookApi = {
   confirmProposal: (
     book_id: string,
     proposal?: BookProposal,
+    expected_revision?: number,
     onEvent?: (event: BookWsEvent) => void,
   ) =>
     requestOverSocket<{
       type: "confirm_proposal_result";
       book: Book;
       spine: Spine;
+      book_revision: number;
     }>(
-      { type: "confirm_proposal", book_id, proposal: proposal ?? null },
+      {
+        type: "confirm_proposal",
+        book_id,
+        proposal: proposal ?? null,
+        expected_revision,
+      },
       "confirm_proposal_result",
       onEvent,
     ),
-  confirmSpine: (book_id: string, spine?: Spine, auto_compile = true) =>
-    request<{ pages: Page[] }>("/books/confirm-spine", {
+  confirmSpine: (
+    book_id: string,
+    spine?: Spine,
+    auto_compile = true,
+    expected_revision?: number,
+  ) =>
+    request<{ pages: Page[]; book_revision: number }>("/books/confirm-spine", {
       method: "POST",
-      body: JSON.stringify({ book_id, spine: spine ?? null, auto_compile }),
+      body: JSON.stringify({
+        book_id,
+        spine: spine ?? null,
+        auto_compile,
+        expected_revision,
+      }),
     }),
   compilePage: (
     book_id: string,
     page_id: string,
     force = false,
+    expected_revision?: number,
     onEvent?: (event: BookWsEvent) => void,
   ) =>
-    requestOverSocket<{ type: "compile_page_result"; page: Page }>(
-      { type: "compile_page", book_id, page_id, force },
+    requestOverSocket<{
+      type: "compile_page_result";
+      page: Page;
+      book_revision: number;
+    }>(
+      { type: "compile_page", book_id, page_id, force, expected_revision },
       "compile_page_result",
       onEvent,
     ),
@@ -147,11 +210,13 @@ export const bookApi = {
     page_id: string,
     block_id: string,
     params_override?: Record<string, unknown>,
+    expected_revision?: number,
     onEvent?: (event: BookWsEvent) => void,
   ) =>
     requestOverSocket<{
       type: "regenerate_block_result";
       block: Block | null;
+      book_revision: number;
     }>(
       {
         type: "regenerate_block",
@@ -159,6 +224,7 @@ export const bookApi = {
         page_id,
         block_id,
         params_override: params_override ?? null,
+        expected_revision,
       },
       "regenerate_block_result",
       onEvent,
@@ -171,8 +237,9 @@ export const bookApi = {
     params?: Record<string, unknown>;
     position?: number;
     compile_now?: boolean;
+    expected_revision?: number;
   }) =>
-    request<{ block: Block }>("/books/insert-block", {
+    request<{ block: Block; book_revision: number }>("/books/insert-block", {
       method: "POST",
       body: JSON.stringify({
         compile_now: true,
@@ -187,8 +254,9 @@ export const bookApi = {
     block_id: string;
     title?: string;
     body?: string;
+    expected_revision?: number;
   }) =>
-    request<{ block: Block }>("/books/update-block", {
+    request<{ block: Block; book_revision: number }>("/books/update-block", {
       method: "POST",
       body: JSON.stringify(params),
     }),
@@ -209,10 +277,15 @@ export const bookApi = {
   exportUrl: (book_id: string) =>
     apiUrl(`${BASE}/books/${encodeURIComponent(book_id)}/export`),
 
-  deleteBlock: (book_id: string, page_id: string, block_id: string) =>
-    request<{ ok: boolean }>("/books/delete-block", {
+  deleteBlock: (
+    book_id: string,
+    page_id: string,
+    block_id: string,
+    expected_revision?: number,
+  ) =>
+    request<{ ok: boolean; book_revision: number }>("/books/delete-block", {
       method: "POST",
-      body: JSON.stringify({ book_id, page_id, block_id }),
+      body: JSON.stringify({ book_id, page_id, block_id, expected_revision }),
     }),
 
   moveBlock: (
@@ -220,10 +293,17 @@ export const bookApi = {
     page_id: string,
     block_id: string,
     new_position: number,
+    expected_revision?: number,
   ) =>
-    request<{ ok: boolean }>("/books/move-block", {
+    request<{ ok: boolean; book_revision: number }>("/books/move-block", {
       method: "POST",
-      body: JSON.stringify({ book_id, page_id, block_id, new_position }),
+      body: JSON.stringify({
+        book_id,
+        page_id,
+        block_id,
+        new_position,
+        expected_revision,
+      }),
     }),
 
   changeBlockType: (params: {
@@ -232,11 +312,15 @@ export const bookApi = {
     block_id: string;
     new_type: string;
     params_override?: Record<string, unknown>;
+    expected_revision?: number;
   }) =>
-    request<{ block: Block }>("/books/change-block-type", {
-      method: "POST",
-      body: JSON.stringify(params),
-    }),
+    request<{ block: Block; book_revision: number }>(
+      "/books/change-block-type",
+      {
+        method: "POST",
+        body: JSON.stringify(params),
+      },
+    ),
 
   deepDive: (params: {
     book_id: string;
@@ -244,8 +328,9 @@ export const bookApi = {
     topic: string;
     block_id?: string;
     content_type?: string;
+    expected_revision?: number;
   }) =>
-    request<{ page: Page }>("/books/deep-dive", {
+    request<{ page: Page; book_revision: number }>("/books/deep-dive", {
       method: "POST",
       body: JSON.stringify({ content_type: "concept", ...params }),
     }),
@@ -264,10 +349,15 @@ export const bookApi = {
       body: JSON.stringify(params),
     }),
 
-  supplement: (book_id: string, page_id: string, topic: string) =>
-    request<{ block: Block }>("/books/supplement", {
+  supplement: (
+    book_id: string,
+    page_id: string,
+    topic: string,
+    expected_revision?: number,
+  ) =>
+    request<{ block: Block; book_revision: number }>("/books/supplement", {
       method: "POST",
-      body: JSON.stringify({ book_id, page_id, topic }),
+      body: JSON.stringify({ book_id, page_id, topic, expected_revision }),
     }),
 
   setPageChatSession: (book_id: string, page_id: string, session_id: string) =>
@@ -277,17 +367,17 @@ export const bookApi = {
     }),
 
   /** Re-queue unfinished pages, keeping everything already compiled. */
-  resume: (book_id: string) =>
-    request<{ pages: Page[] }>("/books/resume", {
+  resume: (book_id: string, expected_revision?: number) =>
+    request<{ pages: Page[]; book_revision: number }>("/books/resume", {
       method: "POST",
-      body: JSON.stringify({ book_id }),
+      body: JSON.stringify({ book_id, expected_revision }),
     }),
 
   /** Destructive: discards every page and regenerates from the spine. */
-  rebuild: (book_id: string, auto_compile = true) =>
-    request<{ pages: Page[] }>("/books/rebuild", {
+  rebuild: (book_id: string, auto_compile = true, expected_revision?: number) =>
+    request<{ pages: Page[]; book_revision: number }>("/books/rebuild", {
       method: "POST",
-      body: JSON.stringify({ book_id, auto_compile }),
+      body: JSON.stringify({ book_id, auto_compile, expected_revision }),
     }),
 
   health: (book_id: string) =>
@@ -309,19 +399,25 @@ export const bookApi = {
         last_error_at?: string;
         repeated_failures?: { signature: string; count: number }[];
       };
+      generation: GenerationSummary;
     }>(`/books/${encodeURIComponent(book_id)}/health`),
 
   /** Mark the current KB state as seen. Rejected with 409 while pages the last
    *  drift flagged are still awaiting recompilation; `force` dismisses anyway. */
-  refreshFingerprints: (book_id: string, force = false) =>
+  refreshFingerprints: (
+    book_id: string,
+    force = false,
+    expected_revision?: number,
+  ) =>
     request<{
       book_id: string;
       kb_fingerprints: Record<string, string>;
       stale_page_ids: string[];
+      book_revision: number;
     }>(
-      `/books/${encodeURIComponent(book_id)}/refresh-fingerprints${
-        force ? "?force=true" : ""
-      }`,
+      `/books/${encodeURIComponent(book_id)}/refresh-fingerprints?force=${
+        force ? "true" : "false"
+      }${expected_revision ? `&expected_revision=${expected_revision}` : ""}`,
       { method: "POST" },
     ),
 

@@ -468,6 +468,29 @@ class LearningService:
                     session_id=interaction.session_id,
                     turn_id=interaction.turn_id,
                 )
+            elif (
+                interaction.status == InteractionStatus.ANSWERED
+                and interaction.question.question_type == "choice"
+            ):
+                # Recover from a prior unreadable composer commit (#1004): allow
+                # a later readable pick to replace the stalled user_answer.
+                from deeptutor.learning.pending import is_readable_choice_answer
+
+                stored = str(interaction.user_answer or "")
+                incoming = str(answer or "")
+                if not is_readable_choice_answer(
+                    stored, interaction.question.options
+                ) and is_readable_choice_answer(incoming, interaction.question.options):
+                    interaction.user_answer = incoming
+                    interaction.session_id = session_id or interaction.session_id
+                    interaction.turn_id = turn_id or interaction.turn_id
+                    tx.put_interaction(interaction)
+                    tx.emit(
+                        "interaction.answered",
+                        {"interaction_id": interaction.interaction_id},
+                        session_id=interaction.session_id,
+                        turn_id=interaction.turn_id,
+                    )
             return interaction
 
         _, interaction = self._store.mutate(book_id, record)
@@ -517,20 +540,26 @@ class LearningService:
                 raise NoPendingInteractionError("The question was abandoned")
 
             pending = interaction.question
-            raw_answer = (
-                interaction.user_answer
-                if interaction.status == InteractionStatus.ANSWERED
-                else str(answer or "")
-            )
+            raw_answer = str(answer or "")
             if interaction.status == InteractionStatus.ANSWERED:
+                stored = str(interaction.user_answer or "")
                 if pending.question_type == "choice":
                     from deeptutor.learning.pending import (
                         has_option_bodies,
+                        is_readable_choice_answer,
                         parse_options,
                         resolve_choice_submission,
                     )
 
                     option_map = parse_options(pending.options)
+                    if is_readable_choice_answer(stored, option_map):
+                        raw_answer = stored
+                    elif is_readable_choice_answer(raw_answer, option_map):
+                        # Prior commit was unreadable clarifying text (#1004) —
+                        # accept the fresh readable answer and rewrite storage.
+                        interaction.user_answer = raw_answer
+                    else:
+                        raw_answer = stored
                     if has_option_bodies(option_map):
                         graded_answer = (
                             resolve_choice_submission(raw_answer, option_map) or raw_answer
@@ -542,6 +571,7 @@ class LearningService:
                             raw_answer if answer_for_grading is None else answer_for_grading
                         )
                 else:
+                    raw_answer = stored
                     graded_answer = raw_answer
             else:
                 graded_answer = raw_answer if answer_for_grading is None else answer_for_grading

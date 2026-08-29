@@ -1,12 +1,47 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  ALargeSmall,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Minus,
+  Plus,
+  RotateCcw,
+  Rows3,
+  SunMoon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AnnotationItem, UnitKind } from "@/lib/reading-api";
 import { getUnitText } from "@/lib/reading-api";
-import { segmentTextByQuotes } from "@/lib/reading-quote-locator";
+import {
+  DEFAULT_FONT_SIZE,
+  DEFAULT_LINE_WIDTH,
+  DEFAULT_READER_DISPLAY_PREFERENCES,
+  MAX_FONT_SIZE,
+  MAX_LINE_WIDTH,
+  MIN_FONT_SIZE,
+  MIN_LINE_WIDTH,
+  normaliseReaderDisplayPreferences,
+  readerDisplayShortcut,
+  type ReaderTheme,
+} from "@/lib/reading-display-preferences";
+import {
+  activeReaderHeading,
+  extractReaderHeadings,
+  readerLinesWithHeadings,
+  type ReaderHeading,
+} from "@/lib/reading-outline";
 import { cleanQuote } from "@/lib/reading-selection";
+import { toRecogitoTextAnnotation } from "@/lib/reading-w3c-annotations";
 import type { JumpRequest, SelectionPayload } from "./PdfDocumentView";
 
 const COLOR_INK: Record<string, string> = {
@@ -16,6 +51,9 @@ const COLOR_INK: Record<string, string> = {
   pink: "250 161 199",
   purple: "199 174 250",
 };
+
+const READER_PREFS_KEY = "dt.reader.textPreferences";
+const LINE_WIDTH_STEPS = [48, 64, 84, 104];
 
 export interface TextUnitViewProps {
   materialId: string;
@@ -27,6 +65,9 @@ export interface TextUnitViewProps {
   onSelection: (payload: SelectionPayload | null) => void;
   onAnnotationClick?: (annotation: AnnotationItem) => void;
   onVisibleLocatorChange?: (locator: number) => void;
+  onHeadingsChange?: (headings: ReaderHeading[]) => void;
+  onActiveHeadingChange?: (headingId: string | null) => void;
+  headingJump?: { id: string; nonce: number } | null;
 }
 
 /**
@@ -48,13 +89,114 @@ export function TextUnitView({
   onSelection,
   onAnnotationClick,
   onVisibleLocatorChange,
+  onHeadingsChange,
+  onActiveHeadingChange,
+  headingJump,
 }: TextUnitViewProps) {
   const { t } = useTranslation();
+  const readerRootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const articleRef = useRef<HTMLElement | null>(null);
+  const textSelectorToolsRef = useRef<{
+    rangeToSelector: (
+      range: Range,
+      container: HTMLElement,
+    ) => { quote: string; start: number; end: number };
+    getQuoteContext: (
+      range: Range,
+      container: HTMLElement,
+    ) => { prefix: string; suffix: string };
+  } | null>(null);
   const [locator, setLocator] = useState(1);
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
+  const [lineWidth, setLineWidth] = useState(DEFAULT_LINE_WIDTH);
+  const [serif, setSerif] = useState(true);
+  const [readerTheme, setReaderTheme] = useState<ReaderTheme>("auto");
+
+  useEffect(() => {
+    try {
+      const value = normaliseReaderDisplayPreferences(
+        JSON.parse(window.localStorage.getItem(READER_PREFS_KEY) || "{}"),
+      );
+      setFontSize(value.fontSize);
+      setLineWidth(value.lineWidth);
+      setSerif(value.serif);
+      setReaderTheme(value.readerTheme);
+    } catch {
+      // Invalid or unavailable local storage falls back to readable defaults.
+    }
+  }, []);
+
+  const updatePreferences = useCallback(
+    (
+      next: Partial<{
+        fontSize: number;
+        lineWidth: number;
+        serif: boolean;
+        readerTheme: ReaderTheme;
+      }>,
+    ) => {
+      const merged = { fontSize, lineWidth, serif, readerTheme, ...next };
+      setFontSize(merged.fontSize);
+      setLineWidth(merged.lineWidth);
+      setSerif(merged.serif);
+      setReaderTheme(merged.readerTheme);
+      try {
+        window.localStorage.setItem(READER_PREFS_KEY, JSON.stringify(merged));
+      } catch {
+        // Preferences still apply for the current session.
+      }
+    },
+    [fontSize, lineWidth, readerTheme, serif],
+  );
+
+  const changeFontSize = useCallback(
+    (next: number) => {
+      updatePreferences({
+        fontSize: Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, next)),
+      });
+    },
+    [updatePreferences],
+  );
+
+  const resetPreferences = useCallback(() => {
+    updatePreferences(DEFAULT_READER_DISPLAY_PREFERENCES);
+  }, [updatePreferences]);
+
+  const cycleLineWidth = useCallback(() => {
+    const nextWidth =
+      LINE_WIDTH_STEPS.find((width) => width > lineWidth) ?? MIN_LINE_WIDTH;
+    updatePreferences({ lineWidth: nextWidth });
+  }, [lineWidth, updatePreferences]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const root = readerRootRef.current;
+      const action = readerDisplayShortcut({
+        key: event.key,
+        modifier: event.metaKey || event.ctrlKey,
+        readerHovered: root?.matches(":hover") ?? false,
+        readerFocused: Boolean(root && root.contains(document.activeElement)),
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "increase") changeFontSize(fontSize + 1);
+      if (action === "decrease") changeFontSize(fontSize - 1);
+      if (action === "reset") resetPreferences();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [changeFontSize, fontSize, resetPreferences]);
+  const headingsChangeRef = useRef(onHeadingsChange);
+  const activeHeadingChangeRef = useRef(onActiveHeadingChange);
+
+  useEffect(() => {
+    headingsChangeRef.current = onHeadingsChange;
+    activeHeadingChangeRef.current = onActiveHeadingChange;
+  }, [onActiveHeadingChange, onHeadingsChange]);
 
   useEffect(() => {
     setLocator(1);
@@ -103,14 +245,128 @@ export function TextUnitView({
     if (containerRef.current) containerRef.current.scrollTop = 0;
   }, [jump, unitCount]);
 
-  const runs = useMemo(
-    () =>
-      segmentTextByQuotes(
-        text,
-        annotations.filter((a) => a.locator === locator),
-      ),
-    [text, annotations, locator],
+  useEffect(() => {
+    const article = articleRef.current;
+    if (!article || loading || error) return;
+    let cancelled = false;
+    let annotator: { destroy: () => void } | null = null;
+
+    void import("@recogito/text-annotator")
+      .then((module) => {
+        if (cancelled) return;
+        textSelectorToolsRef.current = {
+          rangeToSelector: module.rangeToSelector,
+          getQuoteContext: module.getQuoteContext,
+        };
+        const instance = module.createTextAnnotator(article, {
+          annotatingEnabled: false,
+          renderer: "SPANS",
+          style: (annotation) => {
+            const properties = annotation.properties as
+              | { annotationId?: string; color?: string; kind?: string }
+              | undefined;
+            const color =
+              COLOR_INK[properties?.color ?? ""] ?? COLOR_INK.yellow;
+            if (properties?.kind === "underline") {
+              return {
+                fill: "transparent",
+                underlineColor: `rgb(${color})`,
+                underlineThickness: 2,
+              };
+            }
+            return {
+              fill: `rgb(${color})`,
+              fillOpacity:
+                properties?.annotationId === highlightedAnnotationId
+                  ? 0.8
+                  : 0.55,
+            };
+          },
+        });
+        annotator = instance;
+        const rows = annotations
+          .filter((annotation) => annotation.locator === locator)
+          .map((annotation) =>
+            toRecogitoTextAnnotation(annotation, article.textContent ?? ""),
+          )
+          .filter((annotation) => annotation !== null);
+        instance.setAnnotations(rows);
+        instance.on("clickAnnotation", (selected) => {
+          const id = selected.id;
+          const annotation = annotations.find(
+            (row) => row.annotation_id === id,
+          );
+          if (annotation) onAnnotationClick?.(annotation);
+        });
+        if (highlightedAnnotationId) {
+          instance.scrollIntoView(
+            highlightedAnnotationId,
+            containerRef.current ?? article,
+          );
+        }
+      })
+      .catch(() => {
+        // The text remains readable and selection falls back to legacy quotes.
+        if (!cancelled) textSelectorToolsRef.current = null;
+      });
+
+    return () => {
+      cancelled = true;
+      annotator?.destroy();
+      textSelectorToolsRef.current = null;
+    };
+  }, [
+    annotations,
+    error,
+    highlightedAnnotationId,
+    loading,
+    locator,
+    onAnnotationClick,
+    text,
+  ]);
+
+  const pageHeadings = useMemo(
+    () => extractReaderHeadings([text], locator),
+    [locator, text],
   );
+
+  useEffect(() => {
+    headingsChangeRef.current?.(pageHeadings);
+    return () => headingsChangeRef.current?.([]);
+  }, [pageHeadings]);
+
+  useEffect(() => {
+    if (!headingJump) return;
+    const container = containerRef.current;
+    const element = container?.querySelector<HTMLElement>(
+      `[data-reader-heading-id="${CSS.escape(headingJump.id)}"]`,
+    );
+    if (!container || !element) return;
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    container.scrollTo({
+      top: Math.max(
+        0,
+        container.scrollTop + elementRect.top - containerRect.top - 24,
+      ),
+    });
+    activeHeadingChangeRef.current?.(headingJump.id);
+  }, [headingJump]);
+
+  const handleContainerScroll = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || pageHeadings.length === 0) return;
+    const containerRect = container.getBoundingClientRect();
+    activeHeadingChangeRef.current?.(
+      activeReaderHeading(pageHeadings, (heading) => {
+        const element = container.querySelector<HTMLElement>(
+          `[data-reader-heading-id="${CSS.escape(heading.id)}"]`,
+        );
+        if (!element) return null;
+        return element.getBoundingClientRect().top - containerRect.top;
+      }),
+    );
+  }, [pageHeadings]);
 
   const handlePointerUp = useCallback(() => {
     const selection = window.getSelection();
@@ -119,11 +375,19 @@ export function TextUnitView({
       return;
     }
     const range = selection.getRangeAt(0);
-    if (!containerRef.current?.contains(range.commonAncestorContainer)) {
+    if (
+      !text.trim() ||
+      !articleRef.current?.contains(range.commonAncestorContainer)
+    ) {
       onSelection(null);
       return;
     }
-    const quote = cleanQuote(selection.toString());
+    const tools = textSelectorToolsRef.current;
+    const selector = tools?.rangeToSelector(range, articleRef.current);
+    const quote =
+      selector && selector.quote.length <= 2000
+        ? selector.quote
+        : cleanQuote(selection.toString());
     if (!quote) {
       onSelection(null);
       return;
@@ -135,51 +399,137 @@ export function TextUnitView({
       quote,
       // No geometry: a reflowing text view has none worth storing.
       rects: [],
+      selectors:
+        selector && selector.quote === quote
+          ? [
+              {
+                type: "TextQuoteSelector",
+                exact: selector.quote,
+                ...tools?.getQuoteContext(range, articleRef.current),
+              },
+              {
+                type: "TextPositionSelector",
+                start: selector.start,
+                end: selector.end,
+              },
+            ]
+          : [],
       anchor: last
         ? { x: last.left + last.width / 2, y: last.top }
         : { x: 0, y: 0 },
     });
-  }, [locator, onSelection]);
+  }, [locator, onSelection, text]);
 
   const canPrev = locator > 1;
   const canNext = locator < unitCount;
 
   return (
-    <div className="flex h-full flex-col bg-[var(--background)]">
-      <div className="flex items-center justify-center gap-2 border-b border-[var(--border)] px-4 py-2">
-        <button
-          type="button"
-          disabled={!canPrev}
-          onClick={() => setLocator((current) => Math.max(1, current - 1))}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition hover:bg-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-35 disabled:hover:bg-transparent"
-          aria-label={t("Previous")}
-        >
-          <ChevronLeft size={15} />
-        </button>
-        <span className="min-w-[120px] text-center font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-          {t("{{unit}} {{n}} of {{total}}", {
-            unit: t(unitLabel(unit)),
-            n: locator,
-            total: unitCount,
-          })}
-        </span>
-        <button
-          type="button"
-          disabled={!canNext}
-          onClick={() =>
-            setLocator((current) => Math.min(unitCount, current + 1))
-          }
-          className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition hover:bg-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-35 disabled:hover:bg-transparent"
-          aria-label={t("Next")}
-        >
-          <ChevronRight size={15} />
-        </button>
+    <div
+      ref={readerRootRef}
+      tabIndex={-1}
+      onPointerDown={() =>
+        readerRootRef.current?.focus({ preventScroll: true })
+      }
+      className="flex h-full flex-col"
+      style={
+        readerTheme === "sepia"
+          ? { background: "#f4ecd8", color: "#473c2c" }
+          : readerTheme === "night"
+            ? { background: "#16181d", color: "#e8e5df" }
+            : { background: "var(--background)" }
+      }
+    >
+      <div className="flex items-center justify-between gap-2 overflow-x-auto border-b border-[var(--border)] px-2 py-2 sm:px-3">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <PreferenceButton
+            label={t("Smaller text")}
+            icon={Minus}
+            disabled={fontSize <= MIN_FONT_SIZE}
+            onClick={() => changeFontSize(fontSize - 1)}
+          />
+          <span
+            aria-live="polite"
+            className="min-w-[42px] text-center font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]"
+          >
+            {Math.round((fontSize / 16) * 100)}%
+          </span>
+          <PreferenceButton
+            label={t("Larger text")}
+            icon={Plus}
+            disabled={fontSize >= MAX_FONT_SIZE}
+            onClick={() => changeFontSize(fontSize + 1)}
+          />
+          <PreferenceButton
+            label={t("Reset reading display")}
+            icon={RotateCcw}
+            onClick={resetPreferences}
+          />
+          <PreferenceButton
+            label={serif ? t("Use sans-serif font") : t("Use serif font")}
+            icon={ALargeSmall}
+            active={!serif}
+            onClick={() => updatePreferences({ serif: !serif })}
+          />
+          <PreferenceButton
+            label={t("Change line width")}
+            icon={Rows3}
+            onClick={cycleLineWidth}
+          />
+          <span className="hidden min-w-[44px] font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] sm:inline">
+            {`${lineWidth}ch`}
+          </span>
+          <PreferenceButton
+            label={t("Change reading theme")}
+            icon={SunMoon}
+            active={readerTheme !== "auto"}
+            onClick={() =>
+              updatePreferences({
+                readerTheme:
+                  readerTheme === "auto"
+                    ? "sepia"
+                    : readerTheme === "sepia"
+                      ? "night"
+                      : "auto",
+              })
+            }
+          />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            disabled={!canPrev}
+            onClick={() => setLocator((current) => Math.max(1, current - 1))}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition hover:bg-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-35 disabled:hover:bg-transparent"
+            aria-label={t("Previous")}
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <span className="min-w-[120px] text-center font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
+            {t("{{unit}} {{n}} of {{total}}", {
+              unit: t(unitLabel(unit)),
+              n: locator,
+              total: unitCount,
+            })}
+          </span>
+          <button
+            type="button"
+            disabled={!canNext}
+            onClick={() =>
+              setLocator((current) => Math.min(unitCount, current + 1))
+            }
+            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition hover:bg-[var(--muted)] hover:text-[var(--foreground)] disabled:opacity-35 disabled:hover:bg-transparent"
+            aria-label={t("Next")}
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
       </div>
 
       <div
         ref={containerRef}
         data-reader-unit={locator}
         onMouseUp={handlePointerUp}
+        onScroll={handleContainerScroll}
         className="dt-reader-scroll flex-1 overflow-y-auto overscroll-contain px-8 py-7"
       >
         {loading ? (
@@ -190,47 +540,108 @@ export function TextUnitView({
         ) : error ? (
           <p className="text-[12px] text-[var(--muted-foreground)]">{error}</p>
         ) : (
-          <article className="mx-auto max-w-[68ch] whitespace-pre-wrap font-serif text-[15px] leading-[1.75] text-[var(--foreground)] selection:bg-[var(--primary)]/20">
-            {runs.length === 0 ? (
+          <article
+            ref={articleRef}
+            className={`mx-auto whitespace-pre-wrap leading-[1.75] selection:bg-[var(--primary)]/20 ${
+              serif ? "font-serif" : "font-sans"
+            }`}
+            style={{
+              maxWidth: `${lineWidth}ch`,
+              fontSize: `${fontSize}px`,
+              color: readerTheme === "auto" ? "var(--foreground)" : "inherit",
+            }}
+          >
+            {!text.trim() ? (
               <span className="text-[var(--muted-foreground)]">
                 {t("This section has no extractable text.")}
               </span>
             ) : (
-              runs.map((run, index) =>
-                run.mark ? (
-                  <mark
-                    key={index}
-                    title={run.mark.note || undefined}
-                    onClick={() =>
-                      onAnnotationClick?.(run.mark as AnnotationItem)
-                    }
-                    className={`cursor-pointer rounded-[2px] px-[1px] text-[var(--foreground)] ${
-                      run.mark.annotation_id === highlightedAnnotationId
-                        ? "ring-2 ring-[var(--ring)]"
-                        : ""
-                    }`}
-                    style={{
-                      background:
-                        run.mark.kind === "underline"
-                          ? "transparent"
-                          : `rgb(${COLOR_INK[run.mark.color] ?? COLOR_INK.yellow} / 0.55)`,
-                      borderBottom:
-                        run.mark.kind === "underline"
-                          ? `2px solid rgb(${COLOR_INK[run.mark.color] ?? COLOR_INK.yellow})`
-                          : undefined,
-                    }}
-                  >
-                    {run.text}
-                  </mark>
-                ) : (
-                  <span key={index}>{run.text}</span>
-                ),
-              )
+              <TextWithHeadings text={text} headings={pageHeadings} />
             )}
           </article>
         )}
       </div>
     </div>
+  );
+}
+
+function PreferenceButton({
+  label,
+  icon: Icon,
+  active = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  icon: typeof Minus;
+  active?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition hover:bg-[var(--muted)] disabled:opacity-35 disabled:hover:bg-transparent ${
+        active
+          ? "text-[var(--foreground)]"
+          : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+      }`}
+    >
+      <Icon size={15} />
+    </button>
+  );
+}
+
+function TextWithHeadings({
+  text,
+  headings,
+}: {
+  text: string;
+  headings: ReaderHeading[];
+}) {
+  const lines = useMemo(
+    () => readerLinesWithHeadings(text, headings),
+    [headings, text],
+  );
+
+  return (
+    <>
+      {lines.map((line, lineIndex) => {
+        const key = `line-${lineIndex}`;
+        if (line.heading) {
+          const Heading = `h${line.heading.level}` as
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6";
+          return (
+            <Fragment key={key}>
+              {lineIndex > 0 && "\n"}
+              <Heading
+                id={line.heading.id}
+                data-reader-heading-id={line.heading.id}
+                className="mt-5 mb-2 font-serif text-[var(--foreground)] first:mt-0"
+              >
+                {line.text}
+              </Heading>
+            </Fragment>
+          );
+        }
+        return (
+          <Fragment key={key}>
+            {lineIndex > 0 && "\n"}
+            {line.text}
+          </Fragment>
+        );
+      })}
+    </>
   );
 }
 

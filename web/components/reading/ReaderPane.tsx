@@ -26,14 +26,18 @@ import {
 } from "@/lib/reading-api";
 import { AnnotationList } from "./AnnotationList";
 import { AnnotationPopover } from "./AnnotationPopover";
+import { EpubDocumentView } from "./EpubDocumentView";
 import { MaterialPicker } from "./MaterialPicker";
+import { ReaderOutline } from "./ReaderOutline";
 import {
   PdfDocumentView,
   type JumpRequest,
   type SelectionPayload,
 } from "./PdfDocumentView";
 import { ReaderResizeHandle } from "./ReaderResizeHandle";
+import { ReadingExtensionBar } from "./ReadingExtensionBar";
 import { TextUnitView, unitLabel } from "./TextUnitView";
+import type { ReaderHeading } from "@/lib/reading-outline";
 
 /** Event the reader dispatches to prefill the composer from a selection. */
 export const READER_ASK_EVENT = "dt:reader-ask";
@@ -90,10 +94,20 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
   // user decided, and that wins from then on.
   const [annotationPanel, setAnnotationPanel] = useState<boolean | null>(null);
   const [showOutline, setShowOutline] = useState(false);
+  const [outlineUserChoice, setOutlineUserChoice] = useState<boolean | null>(
+    null,
+  );
   const [autoJump, setAutoJump] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [currentLocator, setCurrentLocator] = useState(1);
+  const [pageHeadings, setPageHeadings] = useState<ReaderHeading[]>([]);
+  const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  const [headingJump, setHeadingJump] = useState<{
+    id: string;
+    nonce: number;
+  } | null>(null);
   const nonceRef = useRef(0);
+  const headingNonceRef = useRef(0);
 
   // -- persisted auto-jump preference --------------------------------------
 
@@ -105,6 +119,63 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
       // Private mode / storage disabled — keep the default.
     }
   }, []);
+
+  useEffect(() => {
+    if (!material) {
+      setShowOutline(false);
+      setOutlineUserChoice(null);
+      setPageHeadings([]);
+      setActiveHeadingId(null);
+      setHeadingJump(null);
+      return;
+    }
+    try {
+      const stored = window.localStorage.getItem(
+        `dt.reader.outline.${material.material_id}`,
+      );
+      setOutlineUserChoice(stored === null ? null : stored === "open");
+    } catch {
+      setOutlineUserChoice(null);
+    }
+  }, [material]);
+
+  useEffect(() => {
+    if (!material || outlineUserChoice !== null) return;
+    const desktop = window.matchMedia("(min-width: 768px)").matches;
+    setShowOutline(
+      desktop &&
+        ((material.outline?.length ?? 0) >= 8 || pageHeadings.length >= 3),
+    );
+  }, [material, outlineUserChoice, pageHeadings.length]);
+
+  const toggleOutline = useCallback(() => {
+    setShowOutline((current) => {
+      const next = !current;
+      setOutlineUserChoice(next);
+      if (material) {
+        try {
+          window.localStorage.setItem(
+            `dt.reader.outline.${material.material_id}`,
+            next ? "open" : "closed",
+          );
+        } catch {
+          // Storage can be unavailable in private mode; the choice still works here.
+        }
+      }
+      return next;
+    });
+  }, [material]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        toggleOutline();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [toggleOutline]);
 
   const toggleAutoJump = useCallback(() => {
     setAutoJump((current) => {
@@ -245,6 +316,8 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
           quote: selection.quote,
           note,
           rects: selection.rects,
+          source_anchor: selection.sourceAnchor ?? "",
+          selectors: selection.selectors ?? [],
         },
         {
           annotation_id: temporaryId,
@@ -254,6 +327,8 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
           quote: selection.quote,
           note,
           rects: selection.rects,
+          source_anchor: selection.sourceAnchor ?? "",
+          selectors: selection.selectors ?? [],
           author: "user",
           created_at: now,
           updated_at: now,
@@ -314,11 +389,29 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
       (material?.outline ?? []).filter((row) => row.title.trim().length > 0),
     [material],
   );
+  const hasContents = outlineRows.length > 0 || pageHeadings.length > 0;
 
   return (
     <div className="relative flex h-full min-w-0 flex-col border-r border-[var(--border)] bg-[var(--background)]">
       <ReaderResizeHandle />
       <header className="flex h-11 shrink-0 items-center gap-1 border-b border-[var(--border)] px-2.5">
+        {material && hasContents && (
+          <button
+            type="button"
+            title={t("Contents")}
+            aria-label={t("Contents")}
+            aria-pressed={showOutline}
+            onClick={toggleOutline}
+            className={`mr-1 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[11.5px] font-medium transition ${
+              showOutline
+                ? "bg-[var(--primary)]/12 text-[var(--primary)]"
+                : "text-[var(--muted-foreground)] hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
+            }`}
+          >
+            <List size={14} />
+            <span className="hidden sm:inline">{t("Contents")}</span>
+          </button>
+        )}
         <FileText
           size={14}
           className="shrink-0 text-[var(--muted-foreground)]"
@@ -335,14 +428,6 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
             <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-[var(--muted-foreground)]">
               {unitWord} {currentLocator}/{material.unit_count}
             </span>
-            {outlineRows.length > 0 && (
-              <HeaderButton
-                icon={List}
-                label={t("Outline")}
-                active={showOutline}
-                onClick={() => setShowOutline((open) => !open)}
-              />
-            )}
             <HeaderButton
               icon={Crosshair}
               label={
@@ -402,34 +487,37 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
         </div>
       )}
 
-      {showOutline && material && outlineRows.length > 0 && (
-        <nav className="dt-reader-scroll max-h-[34%] shrink-0 overflow-y-auto border-b border-[var(--border)] bg-[var(--muted)]/25 px-2 py-1.5">
-          <ul>
-            {outlineRows.map((row, index) => (
-              <li key={`${row.locator}-${index}`}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    requestJump(row.locator);
-                    setShowOutline(false);
-                  }}
-                  style={{ paddingLeft: `${6 + (row.level - 1) * 12}px` }}
-                  className="flex w-full items-baseline gap-2 rounded-md py-[3px] pr-2 text-left transition hover:bg-[var(--muted)]"
-                >
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--foreground)]">
-                    {row.title}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
-                    {row.locator}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </nav>
+      {material && (
+        <ReadingExtensionBar
+          materialId={material.material_id}
+          locator={currentLocator}
+          selection={selection?.quote}
+          onError={setError}
+        />
       )}
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
+        {showOutline && material && hasContents && (
+          <ReaderOutline
+            rows={outlineRows}
+            pageHeadings={pageHeadings}
+            activeHeadingId={activeHeadingId}
+            currentLocator={currentLocator}
+            onNavigate={(locator) => {
+              requestJump(locator);
+              if (!window.matchMedia("(min-width: 768px)").matches)
+                setShowOutline(false);
+            }}
+            onNavigateHeading={(heading) => {
+              headingNonceRef.current += 1;
+              setHeadingJump({
+                id: heading.id,
+                nonce: headingNonceRef.current,
+              });
+            }}
+            onClose={() => setShowOutline(false)}
+          />
+        )}
         <div className="min-w-0 flex-1">
           {loadingMaterial ? (
             <div className="flex h-full items-center justify-center gap-2 text-[12px] text-[var(--muted-foreground)]">
@@ -439,6 +527,21 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
           ) : !material ? (
             <MaterialPicker
               onOpen={(candidate) => void openMaterial(candidate)}
+            />
+          ) : material.render_mode === "epub" ? (
+            <EpubDocumentView
+              materialId={material.material_id}
+              unitCount={material.unit_count}
+              unitRefs={material.unit_refs}
+              annotations={annotations}
+              jump={jump}
+              highlightedAnnotationId={activeAnnotationId}
+              onSelection={setSelection}
+              onAnnotationClick={(annotation) =>
+                setActiveAnnotationId(annotation.annotation_id)
+              }
+              onVisibleLocatorChange={handleVisibleLocator}
+              onError={setError}
             />
           ) : material.has_raw_view ? (
             <PdfDocumentView
@@ -466,6 +569,9 @@ export function ReaderPane({ onClose }: ReaderPaneProps) {
                 setActiveAnnotationId(annotation.annotation_id)
               }
               onVisibleLocatorChange={handleVisibleLocator}
+              onHeadingsChange={setPageHeadings}
+              onActiveHeadingChange={setActiveHeadingId}
+              headingJump={headingJump}
             />
           )}
         </div>

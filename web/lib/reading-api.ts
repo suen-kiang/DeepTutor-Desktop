@@ -11,6 +11,7 @@ import { apiFetch, apiUrl } from "@/lib/api";
 export type UnitKind = "page" | "chapter" | "slide" | "section";
 export type AnnotationKind = "highlight" | "underline" | "note";
 export type ExportFormat = "auto" | "pdf" | "markdown";
+export type RenderMode = "text" | "pdf" | "epub";
 
 /** Palette offered by the annotation toolbar; mirrored server-side. */
 export const ANNOTATION_COLORS = [
@@ -34,6 +35,7 @@ export interface MaterialInfo {
   created_at: number;
   /** True when the original bytes can be rendered faithfully (PDF today). */
   has_raw_view: boolean;
+  render_mode: RenderMode;
   annotation_count: number;
 }
 
@@ -47,6 +49,13 @@ export interface OutlineRow {
 export interface MaterialDetail extends MaterialInfo {
   outline: OutlineRow[];
   outline_text: string;
+  unit_refs: UnitReference[];
+}
+
+export interface UnitReference {
+  locator: number;
+  source_href: string;
+  title: string;
 }
 
 /**
@@ -59,6 +68,19 @@ export interface MaterialDetail extends MaterialInfo {
  */
 export type NormalisedRect = [number, number, number, number];
 
+export type ReadingTextSelector =
+  | {
+      type: "TextQuoteSelector";
+      exact: string;
+      prefix?: string;
+      suffix?: string;
+    }
+  | {
+      type: "TextPositionSelector";
+      start: number;
+      end: number;
+    };
+
 export interface AnnotationItem {
   annotation_id: string;
   locator: number;
@@ -67,6 +89,8 @@ export interface AnnotationItem {
   quote: string;
   note: string;
   rects: NormalisedRect[];
+  source_anchor: string;
+  selectors?: ReadingTextSelector[];
   /** "user" or "assistant" — the model can annotate too. */
   author: string;
   created_at: number;
@@ -81,12 +105,44 @@ export interface AnnotationDraft {
   quote?: string;
   note?: string;
   rects?: NormalisedRect[];
+  source_anchor?: string;
+  selectors?: ReadingTextSelector[];
+}
+
+export interface ReadingPosition {
+  locator: number;
+  source_anchor: string;
+  percentage: number;
+  updated_at: number;
 }
 
 export interface SupportedFormats {
   extensions: string[];
   max_bytes: number;
   raw_view_extensions: string[];
+}
+
+export interface ReadingExtensionAction {
+  id: string;
+  label: string;
+  trigger: "toolbar";
+  requires: Array<"selection" | "visible_text">;
+}
+
+export interface ReadingExtensionManifest {
+  id: string;
+  version: string;
+  name: string;
+  protocol_version: "1";
+  actions: ReadingExtensionAction[];
+  result_types: Array<"card" | "quiz" | "feedback" | "browser_speech">;
+}
+
+export interface ReadingExtensionResult {
+  type: "card" | "quiz" | "feedback" | "browser_speech";
+  title: string;
+  message: string;
+  payload: Record<string, unknown>;
 }
 
 const BASE = "/api/v1/reading";
@@ -98,6 +154,13 @@ async function unwrap<T>(response: Response): Promise<T> {
   try {
     const body = (await response.json()) as { detail?: unknown };
     if (typeof body?.detail === "string" && body.detail) detail = body.detail;
+    else if (
+      typeof body?.detail === "object" &&
+      body.detail !== null &&
+      "message" in body.detail
+    ) {
+      detail = String((body.detail as { message: unknown }).message);
+    }
   } catch {
     // Non-JSON error body (a proxy page, say) — keep the status line.
   }
@@ -149,9 +212,72 @@ export async function getUnitText(
   );
 }
 
+export async function listReadingExtensions(): Promise<
+  ReadingExtensionManifest[]
+> {
+  const payload: unknown = await unwrap(
+    await apiFetch(apiUrl(`${BASE}/extensions`), { cache: "no-store" }),
+  );
+  if (!Array.isArray(payload)) return [];
+  return payload.filter(
+    (row): row is ReadingExtensionManifest =>
+      Boolean(row) &&
+      typeof row === "object" &&
+      typeof (row as ReadingExtensionManifest).id === "string" &&
+      Array.isArray((row as ReadingExtensionManifest).actions),
+  );
+}
+
+export async function runReadingExtension(
+  materialId: string,
+  extensionId: string,
+  action: string,
+  context: {
+    locator: number;
+    selection?: string;
+    locale?: string;
+  },
+): Promise<ReadingExtensionResult> {
+  return unwrap(
+    await apiFetch(
+      apiUrl(
+        `${BASE}/materials/${materialId}/extensions/${extensionId}/actions/${action}`,
+      ),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(context),
+      },
+    ),
+  );
+}
+
 /** URL of the original bytes. Served with Range support so pdf.js can stream. */
 export function rawMaterialUrl(materialId: string): string {
   return apiUrl(`${BASE}/materials/${materialId}/raw`);
+}
+
+export async function getReadingPosition(
+  materialId: string,
+): Promise<ReadingPosition> {
+  return unwrap(
+    await apiFetch(apiUrl(`${BASE}/materials/${materialId}/position`), {
+      cache: "no-store",
+    }),
+  );
+}
+
+export async function saveReadingPosition(
+  materialId: string,
+  position: Pick<ReadingPosition, "locator" | "source_anchor" | "percentage">,
+): Promise<ReadingPosition> {
+  return unwrap(
+    await apiFetch(apiUrl(`${BASE}/materials/${materialId}/position`), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(position),
+    }),
+  );
 }
 
 export async function listAnnotations(

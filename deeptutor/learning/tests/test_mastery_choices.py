@@ -13,6 +13,7 @@ from deeptutor.capabilities.mastery.choices import (
     canonical_labels,
     format_options,
     has_option_bodies,
+    is_readable_choice_answer,
     option_label_intent,
     parse_options,
     recover_options_from_turn,
@@ -176,6 +177,18 @@ def test_resolve_choice_submission_refuses_an_ambiguous_answer():
     options = {"A": "Step 2", "B": "Step 6"}
     assert resolve_choice_submission("A or B", options) == ""
     assert resolve_choice_submission("", options) == ""
+
+
+def test_readable_choice_answer_requires_selection_intent_not_a_label_mention():
+    options = {"A": "first", "B": "second", "C": "third"}
+    assert is_readable_choice_answer("B", options)
+    assert is_readable_choice_answer("选B", options)
+    assert is_readable_choice_answer("答案是 C", options)
+    assert is_readable_choice_answer("I think it's A", options)
+    assert is_readable_choice_answer("second", options)
+    assert not is_readable_choice_answer("为什么 B 不对？", options)
+    assert not is_readable_choice_answer("Can you explain B", options)
+    assert not is_readable_choice_answer("B or C", options)
 
 
 # ── recover_options_from_turn ────────────────────────────────────────────────

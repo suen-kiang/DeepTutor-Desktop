@@ -636,8 +636,17 @@ class MasteryGradeTool(BaseTool):
         )
         if interaction is not None and interaction.status == InteractionStatus.ANSWERED:
             # The pause/resume boundary already committed the learner's exact
-            # reply. Never let a later model round paraphrase the graded input.
-            answer = interaction.user_answer
+            # reply — unless that commit was unreadable clarifying prose on a
+            # choice card (#1004), in which case a later readable answer may
+            # still recover the gate.
+            from deeptutor.learning.pending import is_readable_choice_answer
+
+            stored = str(interaction.user_answer or "")
+            question = interaction.question
+            if question.question_type != "choice" or is_readable_choice_answer(
+                stored, question.options
+            ):
+                answer = stored
         progress_before = _load_path(service, path_id)
         if progress_before is None:
             return _no_built_path_result("mastery_grade")

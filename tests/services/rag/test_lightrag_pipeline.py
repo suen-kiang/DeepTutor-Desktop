@@ -169,12 +169,41 @@ class _FakeEmbeddingFunc:
         max_token_size=8192,
         send_dimensions=None,
         model_name=None,
+        supports_asymmetric=False,
     ) -> None:
         self.embedding_dim = embedding_dim
         self.func = func
         self.max_token_size = max_token_size
         self.send_dimensions = send_dimensions
         self.model_name = model_name
+        self.supports_asymmetric = supports_asymmetric
+
+    async def __call__(self, *args, **kwargs):
+        if not self.supports_asymmetric:
+            kwargs.pop("context", None)
+        return await self.func(*args, **kwargs)
+
+
+class _LegacyFakeEmbeddingFunc:
+    """Models LightRAG before ``supports_asymmetric`` was introduced."""
+
+    def __init__(
+        self,
+        *,
+        embedding_dim,
+        func,
+        max_token_size=8192,
+        send_dimensions=None,
+        model_name=None,
+    ) -> None:
+        self.embedding_dim = embedding_dim
+        self.func = func
+        self.max_token_size = max_token_size
+        self.send_dimensions = send_dimensions
+        self.model_name = model_name
+
+    async def __call__(self, *args, **kwargs):
+        return await self.func(*args, **kwargs)
 
 
 class _RecordingBridge:
@@ -186,10 +215,10 @@ class _RecordingBridge:
         return await factory()
 
 
-def _install_fake_lightrag(monkeypatch) -> None:
+def _install_fake_lightrag(monkeypatch, embedding_func_cls=_FakeEmbeddingFunc) -> None:
     fake_lightrag = types.ModuleType("lightrag")
     fake_utils = types.ModuleType("lightrag.utils")
-    fake_utils.EmbeddingFunc = _FakeEmbeddingFunc
+    fake_utils.EmbeddingFunc = embedding_func_cls
     monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag)
     monkeypatch.setitem(sys.modules, "lightrag.utils", fake_utils)
 
@@ -201,7 +230,8 @@ def test_fake_embedding_func_matches_the_real_dataclass() -> None:
     lightrag_utils = pytest.importorskip("lightrag.utils")
 
     real_fields = {field.name for field in dataclasses.fields(lightrag_utils.EmbeddingFunc)}
-    stub_fields = set(inspect.signature(_FakeEmbeddingFunc.__init__).parameters.keys() - {"self"})
+    stub = _FakeEmbeddingFunc if "supports_asymmetric" in real_fields else _LegacyFakeEmbeddingFunc
+    stub_fields = set(inspect.signature(stub.__init__).parameters.keys() - {"self"})
     assert stub_fields == real_fields
 
 
@@ -230,9 +260,20 @@ def test_embedding_func_returns_numpy_array(monkeypatch) -> None:
     assert bridge.calls == 1
 
 
-def test_embedding_func_maps_lightrag_query_and_document_context(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("embedding_func_cls", "expected_opt_in"),
+    [
+        (_FakeEmbeddingFunc, True),
+        (_LegacyFakeEmbeddingFunc, None),
+    ],
+)
+def test_embedding_func_maps_lightrag_query_and_document_context(
+    monkeypatch,
+    embedding_func_cls,
+    expected_opt_in,
+) -> None:
     calls: list[tuple[list[str], str | None]] = []
-    _install_fake_lightrag(monkeypatch)
+    _install_fake_lightrag(monkeypatch, embedding_func_cls)
 
     class _Config:
         dim = 3
@@ -247,12 +288,11 @@ def test_embedding_func_maps_lightrag_query_and_document_context(monkeypatch) ->
     monkeypatch.setattr("deeptutor.services.embedding.get_embedding_client", lambda: _Client())
 
     embedding = lr_config.build_embedding_func()
-    asyncio.run(embedding.func(["question"], context="query", _priority=1))
-    asyncio.run(embedding.func(["passage"], context="document"))
-    # The pinned LightRAG passes no context at all; that must mean "no role",
-    # not "document", or every query would be embedded as a passage.
-    asyncio.run(embedding.func(["unlabelled"]))
+    asyncio.run(embedding(["question"], context="query", _priority=1))
+    asyncio.run(embedding(["passage"], context="document"))
+    asyncio.run(embedding(["unlabelled"]))
 
+    assert getattr(embedding, "supports_asymmetric", None) is expected_opt_in
     assert calls == [
         (["question"], "search_query"),
         (["passage"], "search_document"),

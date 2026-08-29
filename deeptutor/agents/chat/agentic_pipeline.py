@@ -195,6 +195,7 @@ class AgenticChatPipeline:
         max_rounds: int | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        initial_tool_choice: str | None = None,
     ) -> None:
         self.language = "zh" if language.lower().startswith("zh") else "en"
         self.llm_config = get_llm_config()
@@ -214,6 +215,9 @@ class AgenticChatPipeline:
         self._deferred_pool: list[Any] = []
         self._exec_enabled = False
         self._kb_manifests: list[KbManifest] = []
+        # A selected capability may require one specific tool on the first
+        # internal loop round. Later rounds return to model-directed selection.
+        self.initial_tool_choice = (initial_tool_choice or "").strip() or None
         # The blocks the turn's system prompt was rendered from, kept for the
         # context-budget breakdown (see ``measure_context_budget``).
         self._last_prompt_blocks: list[PromptBlock] = []
@@ -701,6 +705,38 @@ class AgenticChatPipeline:
             if (seed := cap.pre_loop_seed(context))
         ]
         return "\n\n".join(seed for seed in seeds if seed)
+
+    def _capability_finish_instruction(self, context: UnifiedContext, final_text: str) -> str:
+        """Let an active capability reject a narrow tool-less finish once.
+
+        This is a protocol guard, not a content generator: capabilities return
+        a short instruction only when their own state proves that required tool
+        work remains. A guard failure must not sink the learner's answer.
+        """
+        for cap in self._active_loop_capabilities(context):
+            hook = getattr(cap, "finish_instruction", None)
+            if not callable(hook):
+                continue
+            try:
+                instruction = hook(context, final_text)
+            except Exception:
+                logger.warning(
+                    "finish guard failed for capability %s",
+                    getattr(cap, "name", "?"),
+                    exc_info=True,
+                )
+                continue
+            content = str(instruction or "").strip()
+            if content:
+                return content
+        return ""
+
+    def _has_capability_finish_guard(self, context: UnifiedContext) -> bool:
+        """Whether a capability may need to inspect a tool-less finish first."""
+        return any(
+            callable(getattr(cap, "finish_instruction", None))
+            for cap in self._active_loop_capabilities(context)
+        )
 
     async def _capability_pre_loop_briefings(
         self,

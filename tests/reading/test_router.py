@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+import zipfile
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -56,6 +57,30 @@ def _upload(client: TestClient, name: str = "attention.pdf", data: bytes | None 
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _epub_bytes(*, language: str = "en", paragraph: str = "Readable EPUB text.") -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr(
+            "META-INF/container.xml",
+            "<container><rootfiles><rootfile full-path='OPS/book.opf'/></rootfiles></container>",
+        )
+        archive.writestr(
+            "OPS/book.opf",
+            "<package xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+            "<metadata><dc:identifier>urn:uuid:router-bilingual</dc:identifier>"
+            "<dc:title>Router book</dc:title>"
+            f"<dc:language>{language}</dc:language></metadata>"
+            "<manifest><item id='one' href='one.xhtml'/></manifest>"
+            "<spine><itemref idref='one'/></spine></package>",
+        )
+        archive.writestr(
+            "OPS/one.xhtml",
+            f"<html><body><h1>Opening</h1><p>{paragraph}</p></body></html>",
+        )
+    return stream.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +174,81 @@ def test_supported_formats_names_pdf_as_the_faithful_view(client: TestClient) ->
     assert body["max_bytes"] > 0
 
 
+def test_epub_contract_exposes_source_refs_original_and_position(client: TestClient) -> None:
+    material = _upload(client, name="book.epub", data=_epub_bytes())
+
+    assert material["render_mode"] == "epub"
+    assert material["has_raw_view"] is False
+    assert material["unit_refs"] == [
+        {"locator": 1, "source_href": "OPS/one.xhtml", "title": "Opening"}
+    ]
+    raw = client.get(f"/api/v1/reading/materials/{material['material_id']}/raw")
+    assert raw.status_code == 200
+    assert raw.headers["content-type"] == "application/epub+zip"
+
+    base = f"/api/v1/reading/materials/{material['material_id']}/position"
+    saved = client.put(
+        base,
+        json={"locator": 1, "source_anchor": "epubcfi(/6/2)", "percentage": 0.4},
+    )
+    assert saved.status_code == 200
+    assert client.get(base).json()["source_anchor"] == "epubcfi(/6/2)"
+    assert client.put(base, json={"locator": 2, "percentage": 0}).status_code == 400
+
+
+def test_epub_pairing_requires_confirmation_and_preserves_source_materials(
+    client: TestClient,
+) -> None:
+    english = _upload(client, name="english.epub", data=_epub_bytes())
+    chinese = _upload(
+        client,
+        name="chinese.epub",
+        data=_epub_bytes(language="zh", paragraph="可读的 EPUB 文本。"),
+    )
+
+    candidates = client.get(
+        f"/api/v1/reading/materials/{english['material_id']}/epub-pairing-candidates"
+    )
+    assert candidates.status_code == 200
+    assert candidates.json()[0]["material_id"] == chinese["material_id"]
+    assert client.get("/api/v1/reading/epub-pairings").json() == []
+
+    created = client.post(
+        "/api/v1/reading/epub-pairings",
+        json={
+            "english_material_id": english["material_id"],
+            "chinese_material_id": chinese["material_id"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["pairing"]["status"] == "confirmed"
+    assert body["pairing"]["english_material_id"] == english["material_id"]
+    assert body["pairing"]["chinese_material_id"] == chinese["material_id"]
+    assert client.get("/api/v1/reading/epub-pairings").json() == [body["pairing"]]
+    assert len(client.get("/api/v1/reading/materials").json()) == 2
+
+    removed = client.delete(f"/api/v1/reading/epub-pairings/{body['pairing']['pairing_id']}")
+    assert removed.status_code == 200
+    assert client.get("/api/v1/reading/epub-pairings").json() == []
+    assert len(client.get("/api/v1/reading/materials").json()) == 2
+
+
+def test_epub_pairing_rejects_the_same_language(client: TestClient) -> None:
+    english = _upload(client, name="english.epub", data=_epub_bytes())
+    other = _upload(client, name="other.epub", data=_epub_bytes())
+
+    response = client.post(
+        "/api/v1/reading/epub-pairings",
+        json={
+            "english_material_id": english["material_id"],
+            "chinese_material_id": other["material_id"],
+        },
+    )
+
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # unit text and raw bytes
 # ---------------------------------------------------------------------------
@@ -218,11 +318,13 @@ def test_annotation_create_update_list_delete_round_trip(client: TestClient) -> 
             "quote": "scaled dot-product",
             "note": "core",
             "rects": [[0.1, 0.2, 0.6, 0.24]],
+            "source_anchor": "epubcfi(/6/4)",
         },
     ).json()
     assert created["annotation_id"]
     assert created["author"] == "user"
     assert created["rects"] == [[0.1, 0.2, 0.6, 0.24]]
+    assert created["source_anchor"] == "epubcfi(/6/4)"
 
     updated = client.put(
         base,
@@ -241,6 +343,77 @@ def test_annotation_create_update_list_delete_round_trip(client: TestClient) -> 
     assert client.delete(f"{base}/{created['annotation_id']}").status_code == 200
     assert client.get(base).json() == []
     assert client.delete(f"{base}/{created['annotation_id']}").status_code == 404
+
+
+def test_annotation_round_trips_w3c_text_selectors(client: TestClient) -> None:
+    material = _upload(client)
+    base = f"/api/v1/reading/materials/{material['material_id']}/annotations"
+
+    created = client.put(
+        base,
+        json={
+            "locator": 1,
+            "quote": "Sequence models",
+            "selectors": [
+                {
+                    "type": "TextQuoteSelector",
+                    "exact": "Sequence models",
+                    "prefix": "Chapter one. ",
+                    "suffix": " read",
+                },
+                {"type": "TextPositionSelector", "start": 13, "end": 28},
+            ],
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    assert created.json()["selectors"] == [
+        {
+            "type": "TextQuoteSelector",
+            "exact": "Sequence models",
+            "prefix": "Chapter one. ",
+            "suffix": " read",
+        },
+        {"type": "TextPositionSelector", "start": 13, "end": 28},
+    ]
+
+
+def test_annotation_rejects_mismatched_quote_selector(client: TestClient) -> None:
+    material = _upload(client)
+    response = client.put(
+        f"/api/v1/reading/materials/{material['material_id']}/annotations",
+        json={
+            "locator": 1,
+            "quote": "Sequence models",
+            "selectors": [
+                {"type": "TextQuoteSelector", "exact": "different text"},
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "does not match" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"type": "TextPositionSelector", "start": 5, "end": 5},
+        {"type": "TextPositionSelector", "start": 6, "end": 5},
+        {"type": "TextPositionSelector", "start": 0, "end": 2001},
+    ],
+)
+def test_annotation_rejects_invalid_text_positions(
+    client: TestClient,
+    selector: dict,
+) -> None:
+    material = _upload(client)
+    response = client.put(
+        f"/api/v1/reading/materials/{material['material_id']}/annotations",
+        json={"locator": 1, "quote": "x", "selectors": [selector]},
+    )
+
+    assert response.status_code == 422
 
 
 def test_annotation_on_an_out_of_range_locator_is_a_400(client: TestClient) -> None:

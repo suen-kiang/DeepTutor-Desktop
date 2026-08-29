@@ -22,8 +22,11 @@ from typing import Any, Literal
 # What one locator addresses, per source format. Purely presentational for the
 # model and the UI ("page 12" vs "chapter 3"); the addressing is identical.
 UnitKind = Literal["page", "chapter", "slide", "section"]
+RenderMode = Literal["text", "pdf", "epub"]
 
 AnnotationKind = Literal["highlight", "underline", "note"]
+TextSelectorType = Literal["TextQuoteSelector", "TextPositionSelector"]
+MAX_TEXT_SELECTOR_CHARS = 2000
 
 # Palette offered by the reader toolbar. Kept server-side too so an annotation
 # arriving from an older client (or a tool call) can be validated rather than
@@ -50,6 +53,10 @@ class ReadingError(RuntimeError):
 
 class MaterialNotFound(ReadingError):
     """The requested material id does not exist in this user's store."""
+
+
+class ReadingUpgradeConflict(ReadingError):
+    """A source-faithful upgrade would invalidate existing annotations."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +143,30 @@ class OutlineEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class UnitReference:
+    """Source address for one numeric locator in a faithful renderer."""
+
+    locator: int
+    source_href: str = ""
+    title: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "locator": self.locator,
+            "source_href": self.source_href,
+            "title": self.title,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "UnitReference":
+        return cls(
+            locator=max(1, int(data.get("locator") or 1)),
+            source_href=str(data.get("source_href") or ""),
+            title=str(data.get("title") or ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SearchHit:
     """One search match, addressed by locator with surrounding context."""
 
@@ -172,6 +203,9 @@ class MaterialManifest:
     # (today: PDF). Other formats read from extracted text, so the reader shows
     # its text view and the export falls back to a Markdown excerpt.
     has_raw_view: bool = False
+    # Selects the faithful renderer without overloading ``has_raw_view``.
+    # The legacy boolean remains PDF-only until every client understands EPUB.
+    render_mode: RenderMode = "text"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -187,11 +221,15 @@ class MaterialManifest:
             "char_count": self.char_count,
             "created_at": self.created_at,
             "has_raw_view": self.has_raw_view,
+            "render_mode": self.render_mode,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MaterialManifest":
         unit = str(data.get("unit") or "page")
+        render_mode = str(data.get("render_mode") or "")
+        if render_mode not in ("text", "pdf", "epub"):
+            render_mode = "pdf" if data.get("has_raw_view") else "text"
         return cls(
             material_id=str(data.get("material_id") or ""),
             filename=str(data.get("filename") or ""),
@@ -205,7 +243,75 @@ class MaterialManifest:
             char_count=int(data.get("char_count") or 0),
             created_at=float(data.get("created_at") or 0.0),
             has_raw_view=bool(data.get("has_raw_view")),
+            render_mode=render_mode,  # type: ignore[arg-type]
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TextQuoteSelector:
+    """W3C TextQuoteSelector used to re-anchor text after content reflows."""
+
+    exact: str
+    prefix: str = ""
+    suffix: str = ""
+    type: Literal["TextQuoteSelector"] = "TextQuoteSelector"
+
+    def to_dict(self) -> dict[str, Any]:
+        row: dict[str, Any] = {"type": self.type, "exact": self.exact}
+        if self.prefix:
+            row["prefix"] = self.prefix
+        if self.suffix:
+            row["suffix"] = self.suffix
+        return row
+
+
+@dataclass(frozen=True, slots=True)
+class TextPositionSelector:
+    """W3C TextPositionSelector in a rendered unit's text-content space."""
+
+    start: int
+    end: int
+    type: Literal["TextPositionSelector"] = "TextPositionSelector"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type, "start": self.start, "end": self.end}
+
+
+TextSelector = TextQuoteSelector | TextPositionSelector
+
+
+def parse_text_selectors(value: Any) -> tuple[TextSelector, ...]:
+    """Parse only the two bounded selector shapes supported by the reader."""
+
+    if not isinstance(value, (list, tuple)):
+        return ()
+    parsed: list[TextSelector] = []
+    for raw in value[:2]:
+        if not isinstance(raw, dict):
+            continue
+        selector_type = str(raw.get("type") or "")
+        if selector_type == "TextQuoteSelector":
+            exact = str(raw.get("exact") or "")[:2000]
+            if exact:
+                parsed.append(
+                    TextQuoteSelector(
+                        exact=exact,
+                        # W3C prefix is the text immediately before ``exact``;
+                        # when legacy data exceeds the bound, its tail is the
+                        # part that still touches the selection.
+                        prefix=str(raw.get("prefix") or "")[-128:],
+                        suffix=str(raw.get("suffix") or "")[:128],
+                    )
+                )
+        elif selector_type == "TextPositionSelector":
+            try:
+                start = max(0, int(raw.get("start") or 0))
+                end = max(start, int(raw.get("end") or 0))
+            except (TypeError, ValueError):
+                continue
+            if end > start:
+                parsed.append(TextPositionSelector(start=start, end=end))
+    return tuple(parsed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +331,11 @@ class Annotation:
     quote: str = ""
     note: str = ""
     rects: tuple[Rect, ...] = ()
+    # Opaque renderer-native position. EPUB clients store a CFI here.
+    source_anchor: str = ""
+    # Portable W3C selectors for reflowing text. Existing annotations omit
+    # them and continue to resolve through ``quote`` and/or ``rects``.
+    selectors: tuple[TextSelector, ...] = ()
     author: str = "user"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -241,6 +352,8 @@ class Annotation:
             "quote": self.quote,
             "note": self.note,
             "rects": [r.to_list() for r in self.rects],
+            "source_anchor": self.source_anchor,
+            "selectors": [selector.to_dict() for selector in self.selectors],
             "author": self.author,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -263,8 +376,37 @@ class Annotation:
             quote=str(data.get("quote") or ""),
             note=str(data.get("note") or ""),
             rects=rects,
+            source_anchor=str(data.get("source_anchor") or ""),
+            selectors=parse_text_selectors(data.get("selectors")),
             author=str(data.get("author") or "user"),
             created_at=float(data.get("created_at") or 0.0),
+            updated_at=float(data.get("updated_at") or 0.0),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReadingPosition:
+    """Last durable viewport for a material."""
+
+    locator: int = 1
+    source_anchor: str = ""
+    percentage: float = 0.0
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "locator": self.locator,
+            "source_anchor": self.source_anchor,
+            "percentage": self.percentage,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReadingPosition":
+        return cls(
+            locator=max(1, int(data.get("locator") or 1)),
+            source_anchor=str(data.get("source_anchor") or ""),
+            percentage=min(1.0, max(0.0, float(data.get("percentage") or 0.0))),
             updated_at=float(data.get("updated_at") or 0.0),
         )
 
@@ -278,7 +420,15 @@ __all__ = [
     "MaterialNotFound",
     "OutlineEntry",
     "ReadingError",
+    "ReadingPosition",
+    "ReadingUpgradeConflict",
+    "RenderMode",
     "Rect",
     "SearchHit",
+    "TextPositionSelector",
+    "TextQuoteSelector",
+    "TextSelector",
+    "TextSelectorType",
     "UnitKind",
+    "UnitReference",
 ]

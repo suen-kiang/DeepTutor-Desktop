@@ -831,6 +831,59 @@ async def test_status_recovers_answered_interaction_without_exposing_answer_key(
     assert graded["is_correct"] is True
 
 
+@pytest.mark.asyncio
+async def test_grade_recovers_unreadable_choice_answer(path_id):
+    """An unreadable clarifying commit must not permanently block grading (#1004)."""
+    await _build_basic(path_id)
+    initial = json.loads((await MasteryStatusTool().execute(_mastery_path_id=path_id)).content)
+    kp_id = initial["next"]["knowledge_point_id"]
+    quiz = json.loads(
+        (
+            await MasteryQuizTool().execute(
+                _mastery_path_id=path_id,
+                knowledge_point_id=kp_id,
+                question="Compute (2e^{iπ/3})³",
+                expected_answer="A",
+                options=["A: -8", "B: -6", "C: 8", "D: -2"],
+            )
+        ).content
+    )
+    from deeptutor.learning.service import LearningService
+
+    # Simulate the pre-fix deadlock: clarifying prose already persisted.
+    LearningService().record_question_answer(
+        path_id,
+        "先告诉我三角恒等式是什么？",
+        interaction_id=quiz["question_id"],
+    )
+    stuck = LearningStore().get_interaction(path_id, quiz["question_id"])
+    assert stuck is not None
+    assert stuck.status == InteractionStatus.ANSWERED
+
+    blocked = await MasteryGradeTool().execute(
+        _mastery_path_id=path_id,
+        question_id=quiz["question_id"],
+        answer="先告诉我三角恒等式是什么？",
+    )
+    assert blocked.success is False
+    assert "NOT graded" in blocked.content
+
+    recovered = json.loads(
+        (
+            await MasteryGradeTool().execute(
+                _mastery_path_id=path_id,
+                question_id=quiz["question_id"],
+                answer="A",
+            )
+        ).content
+    )
+    assert recovered["is_correct"] is True
+    graded = LearningStore().get_interaction(path_id, quiz["question_id"])
+    assert graded is not None
+    assert graded.status == InteractionStatus.GRADED
+    assert graded.user_answer == "A"
+
+
 # ── assess: the qualitative gate ─────────────────────────────────────────────
 
 

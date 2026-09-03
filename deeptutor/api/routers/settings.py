@@ -42,8 +42,12 @@ from deeptutor.services.config.runtime_settings import (
     CHAT_ATTACHMENT_MAX_TOTAL_MB_RANGE,
     compute_ws_max_size,
 )
-from deeptutor.services.embedding.client import reset_embedding_client
-from deeptutor.services.llm.client import reset_llm_client
+from deeptutor.services.config.settings_draft import (
+    get_settings_draft_service,
+    is_empty_draft,
+    merge_draft_secrets,
+    redact_draft,
+)
 from deeptutor.services.llm.config import clear_llm_config_cache
 from deeptutor.services.model_selection import list_llm_options
 from deeptutor.services.path_service import get_path_service
@@ -53,6 +57,10 @@ from deeptutor.services.settings.interface_settings import (
 from deeptutor.services.settings.interface_settings import (
     atomic_update,
     resolve_languages,
+    sanitize_enabled_tools,
+)
+from deeptutor.services.settings.interface_settings import (
+    get_enabled_optional_tools as _get_enabled_optional_tools,
 )
 from deeptutor.services.settings.starter_settings import (
     TRACE_COUNT_RANGE as STARTER_TRACE_COUNT_RANGE,
@@ -61,7 +69,7 @@ from deeptutor.tools.builtin import USER_TOGGLEABLE_TOOL_NAMES
 
 router = APIRouter()
 # Public UI-settings router. The app shell bootstraps the interface language
-# from GET /api/v1/settings/ui, and auth pages (/register, /login) must be
+# from GET /api/settings/ui, and auth pages (/register, /login) must be
 # able to do the same *before* a session exists — so this one read endpoint
 # is intentionally mounted outside the ``_auth`` dependency (see main.py).
 # It only exposes non-sensitive UI preferences (theme/language), never the
@@ -69,6 +77,12 @@ router = APIRouter()
 public_router = APIRouter()
 
 TOUR_CACHE = None
+
+
+def get_enabled_optional_tools() -> list[str]:
+    """Compatibility export; the source of truth lives in the service layer."""
+
+    return _get_enabled_optional_tools()
 
 
 def _settings_file():
@@ -82,7 +96,7 @@ def _tour_cache_file():
 
 
 DEFAULT_SIDEBAR_NAV_ORDER = {
-    "start": ["/", "/history", "/knowledge", "/notebook"],
+    "start": ["/", "/history", "/knowledge-bases", "/notebooks"],
     "learnResearch": ["/question", "/solver", "/research", "/co_writer"],
 }
 
@@ -131,7 +145,7 @@ class UISettings(BaseModel):
 
 
 class UISettingsUpdate(BaseModel):
-    """Partial UI settings for user-initiated PATCH/PUT updates via /api/v1/settings/ui.
+    """Partial UI settings for user-initiated PATCH/PUT updates via /api/settings/ui.
 
     All fields have None defaults so `model_dump(exclude_unset=True)` naturally
     excludes fields not provided in the frontend payload, while explicitly provided
@@ -185,6 +199,14 @@ class CatalogPayload(BaseModel):
     catalog: dict[str, Any]
 
 
+class SettingsDraftPayload(BaseModel):
+    """The unapplied settings envelope, as the settings UI holds it."""
+
+    catalog: dict[str, Any] | None = None
+    # Opaque per-page state, keyed by the string the page registers with.
+    extensions: dict[str, Any] = Field(default_factory=dict)
+
+
 class CodexReasoningEffortUpdate(BaseModel):
     model: str = Field(min_length=1)
     reasoning_effort: str | None = None
@@ -195,6 +217,15 @@ class FetchModelsPayload(BaseModel):
     base_url: str = ""
     api_key: Optional[str] = None
     profile_id: Optional[str] = None
+    # Which LLM-shaped service the profile lives in (for resolving a masked key).
+    service: Literal["llm", "task"] = "llm"
+    # The profile's API format; decides whether /models takes Anthropic headers.
+    api_format: Optional[str] = None
+
+
+class ModelCapabilitiesQuery(BaseModel):
+    binding: str = ""
+    model: str = ""
 
 
 class NetworkSettingsUpdate(BaseModel):
@@ -237,7 +268,7 @@ class ChatStarterSettingsUpdate(BaseModel):
 
 
 class MinerUSettingsUpdate(BaseModel):
-    """MinerU PDF-parsing backend settings.
+    """MinerU document-parsing backend settings.
 
     ``api_token`` is tri-state: ``None`` keeps the stored token (the UI sends
     None when the user didn't edit the secret field), ``""`` clears it, and a
@@ -325,6 +356,9 @@ def _invalidate_runtime_caches() -> None:
         "Admin applied catalog; resetting global LLM/embedding clients. "
         "In-flight user turns may flip backend client mid-call."
     )
+    from deeptutor.services.embedding.client import reset_embedding_client
+    from deeptutor.services.llm.client import reset_llm_client
+
     clear_llm_config_cache()
     reset_llm_client()
     reset_embedding_client()
@@ -342,42 +376,13 @@ def load_ui_settings() -> dict[str, Any]:
                 # Filter persisted enabled_optional_tools to current
                 # toggleable set so retired tool names can't leak into
                 # the per-turn payload.
-                merged["enabled_optional_tools"] = _sanitize_enabled_tools(
+                merged["enabled_optional_tools"] = sanitize_enabled_tools(
                     merged.get("enabled_optional_tools")
                 )
                 return merged
         except Exception:
             pass
     return DEFAULT_UI_SETTINGS.copy()
-
-
-def _sanitize_enabled_tools(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return list(USER_TOGGLEABLE_TOOL_NAMES)
-    allowed = set(USER_TOGGLEABLE_TOOL_NAMES)
-    seen: set[str] = set()
-    out: list[str] = []
-    for name in value:
-        if isinstance(name, str) and name in allowed and name not in seen:
-            seen.add(name)
-            out.append(name)
-    return out
-
-
-def get_enabled_optional_tools() -> list[str]:
-    """Return the user's currently-enabled toggleable tool names.
-
-    Source of truth for the chat pipeline when a turn doesn't ship an
-    explicit ``tools`` list. Intersected with the admin grant whitelist so
-    a restricted user's saved toggles can't resurrect a revoked tool.
-    """
-    from deeptutor.multi_user.tool_access import allowed_optional_tools
-
-    enabled = _sanitize_enabled_tools(load_ui_settings().get("enabled_optional_tools"))
-    allowed = allowed_optional_tools()
-    if allowed is not None:
-        enabled = [name for name in enabled if name in allowed]
-    return enabled
 
 
 def save_ui_settings(settings: dict[str, Any]) -> None:
@@ -471,6 +476,20 @@ def _provider_choices() -> dict[str, list[dict[str, Any]]]:
                 ),
                 "base_url": s.default_api_base,
                 "auth_mode": s.auth_mode,
+                "supports_wire_api_selection": s.supports_wire_api_selection,
+                # Which protocols a profile on this vendor may pick, and the
+                # vendor endpoint each one lives at when that differs.
+                "api_formats": list(s.api_formats),
+                "default_api_format": s.default_api_format,
+                "base_urls": {
+                    api_format: s.default_api_base_for(api_format)
+                    for api_format in s.api_formats
+                    if s.default_api_base_for(api_format)
+                },
+                # Legacy entries stay resolvable for stored catalogs but are
+                # not offered for new profiles; the same thing is expressed
+                # today as a provider plus an API format.
+                "status": "legacy" if s.is_legacy else "supported",
             }
             for s in PROVIDERS
         ],
@@ -571,6 +590,8 @@ def _provider_choices() -> dict[str, list[dict[str, Any]]]:
     )
     return {
         "llm": llm,
+        # Same shape, same vendors: the task service stands in for the LLM.
+        "task": llm,
         "embedding": embedding,
         "search": search,
         "tts": tts,
@@ -578,6 +599,99 @@ def _provider_choices() -> dict[str, list[dict[str, Any]]]:
         "imagegen": imagegen,
         "videogen": videogen,
     }
+
+
+def _match_service_provider(
+    provider: str,
+    table: dict[str, Any],
+) -> tuple[str, Any] | None:
+    """Find *provider*'s entry in one service's provider table.
+
+    Vendors are not named identically across tables — the LLM registry calls
+    Alibaba's endpoint ``dashscope`` while the embedding table calls it
+    ``aliyun`` — so an exact key miss falls back to the spec's own keywords
+    rather than to a second hand-maintained name map.
+    """
+    if provider in table:
+        return provider, table[provider]
+    for name, spec in table.items():
+        if provider in getattr(spec, "keywords", ()):
+            return name, spec
+    return None
+
+
+def _connection_targets() -> list[dict[str, Any]]:
+    """Which services one vendor credential can configure, and with what.
+
+    The connection UI needs to answer "if I paste an OpenRouter key here, what
+    does it get me?" — so this joins the six per-service provider tables on the
+    vendor and reports, per service, the provider value and the prefills a
+    profile created from that connection should start with. Derived rather than
+    duplicated: adding a vendor to a service table is enough to make it
+    connectable, and the web app never keeps a second copy of the tables.
+    """
+    from deeptutor.services.config.provider_runtime import (
+        EMBEDDING_PROVIDERS,
+        IMAGEGEN_PROVIDERS,
+        STT_PROVIDERS,
+        TTS_PROVIDERS,
+        VIDEOGEN_PROVIDERS,
+    )
+    from deeptutor.services.provider_registry import PROVIDERS
+
+    service_tables: dict[str, dict[str, Any]] = {
+        "embedding": {k: v for k, v in EMBEDDING_PROVIDERS.items() if k != "custom_openai_sdk"},
+        "tts": TTS_PROVIDERS,
+        "stt": STT_PROVIDERS,
+        "imagegen": IMAGEGEN_PROVIDERS,
+        "videogen": VIDEOGEN_PROVIDERS,
+    }
+
+    targets: list[dict[str, Any]] = []
+    for spec in PROVIDERS:
+        # OAuth vendors sign in through their own flow; there is no key to
+        # share, so offering them here would promise something untrue.
+        if spec.is_oauth:
+            continue
+        services: dict[str, dict[str, Any]] = {
+            "llm": {
+                "provider": spec.name,
+                "base_url": spec.default_api_base,
+                "default_model": "",
+            }
+        }
+        for service_name, table in service_tables.items():
+            match = _match_service_provider(spec.name, table)
+            if match is None:
+                continue
+            name, service_spec = match
+            entry: dict[str, Any] = {
+                "provider": name,
+                "base_url": service_spec.default_api_base,
+                "default_model": service_spec.default_model,
+            }
+            if service_name == "embedding":
+                entry["default_dim"] = (
+                    str(service_spec.default_dim) if service_spec.default_dim else ""
+                )
+            if service_name == "tts":
+                entry["default_voice"] = service_spec.default_voice
+            services[service_name] = entry
+        targets.append(
+            {
+                "provider": spec.name,
+                "label": (
+                    "Custom (OpenAI API)"
+                    if spec.name == "custom"
+                    else "Custom (Anthropic API)"
+                    if spec.name == "custom_anthropic"
+                    else spec.label
+                ),
+                "default_base_url": spec.default_api_base,
+                "services": services,
+            }
+        )
+    return sorted(targets, key=lambda item: str(item["label"]).lower())
 
 
 def _api_base_source(system: dict[str, Any]) -> str:
@@ -643,6 +757,7 @@ async def get_settings():
         "ui": load_ui_settings(),
         "catalog": redact_catalog_secrets(get_model_catalog_service().load()),
         "providers": _provider_choices(),
+        "connection_targets": _connection_targets(),
     }
 
 
@@ -1153,12 +1268,13 @@ async def start_mineru_models_download(payload: MinerUModelDownloadPayload):
             message = (
                 f"mineru-models-download not found next to the configured CLI "
                 f"(expected {resolved['path']}). The configured install may be "
-                "magic-pdf 1.x — upgrade to MinerU 2.x for one-click downloads."
+                "legacy magic-pdf — upgrade to MinerU >= 3.4.5 for one-click downloads."
             )
         else:
             message = (
                 "mineru-models-download not found on the server PATH. Install "
-                'MinerU 2.x first (uv pip install -U "mineru[core]") or set the CLI path.'
+                'current MinerU first (uv pip install -U "mineru[all]>=3.4.5") or set '
+                "the CLI path."
             )
         return {"ok": False, "message": message}
 
@@ -1202,6 +1318,10 @@ async def test_mineru_connection(payload: MinerUSettingsUpdate):
             local_cli_probe,
             local_cli_version,
         )
+        from deeptutor.services.parsing.engines.mineru.formats import (
+            MIN_MINERU_VERSION,
+            mineru_version_is_current,
+        )
 
         probe = local_cli_probe(payload.local_cli_path)
         if not probe["found"]:
@@ -1217,7 +1337,7 @@ async def test_mineru_connection(payload: MinerUSettingsUpdate):
                 "ok": False,
                 "message": (
                     "MinerU CLI not found on the server PATH. Install it "
-                    '(uv pip install -U "mineru[core]"), set an explicit CLI path, '
+                    '(uv pip install -U "mineru[all]>=3.4.5"), set an explicit CLI path, '
                     "or switch to cloud mode."
                 ),
             }
@@ -1227,10 +1347,19 @@ async def test_mineru_connection(payload: MinerUSettingsUpdate):
             probe["path"] if probe.get("source") == "configured" else str(probe["command"])
         )
         version = await asyncio.to_thread(local_cli_version, version_target)
-        detail = version or f"at {probe['path']}"
+        if not mineru_version_is_current(version):
+            detail = version or "an unknown version"
+            return {
+                "ok": False,
+                "message": (
+                    f"Local MinerU CLI reported {detail}. DeepTutor needs MinerU >= "
+                    f"{MIN_MINERU_VERSION}; upgrade with "
+                    f"`pip install -U 'mineru[all]>={MIN_MINERU_VERSION}'`."
+                ),
+            }
         return {
             "ok": True,
-            "message": f"Local MinerU CLI detected: {probe['command']} ({detail})",
+            "message": f"Local MinerU CLI detected: {probe['command']} ({version})",
         }
 
     service = get_runtime_settings_service()
@@ -1281,20 +1410,70 @@ async def update_catalog(payload: CatalogPayload):
     return {"catalog": redact_catalog_secrets(catalog)}
 
 
+@router.get("/draft")
+async def get_settings_draft():
+    """Return the unapplied draft, or nothing when there is none.
+
+    The draft is deliberately invisible to every other read path: nothing that
+    resolves runtime configuration looks here, which is the whole difference
+    between saving a draft and applying it.
+    """
+    _require_settings_admin()
+    draft = get_settings_draft_service().load()
+    if is_empty_draft(draft):
+        return {"draft": None}
+    return {"draft": redact_draft(draft)}
+
+
+@router.put("/draft")
+async def update_settings_draft(payload: SettingsDraftPayload):
+    _require_settings_admin()
+    service = get_settings_draft_service()
+    stored = service.load()
+    merged = merge_draft_secrets(
+        payload.model_dump(),
+        stored,
+        get_model_catalog_service().load(),
+    )
+    if is_empty_draft(merged):
+        service.clear()
+        return {"draft": None}
+    saved = service.save(merged)
+    return {"draft": redact_draft(saved)}
+
+
+@router.delete("/draft")
+async def discard_settings_draft():
+    _require_settings_admin()
+    get_settings_draft_service().clear()
+    return {"draft": None}
+
+
 @router.post("/apply")
 async def apply_catalog(payload: CatalogPayload | None = None):
+    """Move settings into the files the runtime reads, and clear the draft.
+
+    With no body this promotes the stored draft's catalog, which is how the
+    settings UI applies: credentials that only ever existed in a draft would
+    otherwise have to round-trip through the browser as placeholders and come
+    back resolving to the previous key.
+    """
     _require_settings_admin()
     service = get_model_catalog_service()
+    draft_service = get_settings_draft_service()
     current = service.load()
-    catalog = (
-        reconcile_codex_catalog_update(
-            current,
-            restore_catalog_secrets(payload.catalog, current),
+    if payload is not None:
+        proposed = restore_catalog_secrets(payload.catalog, current)
+    else:
+        draft_catalog = draft_service.load().get("catalog")
+        proposed = (
+            restore_catalog_secrets(draft_catalog, current)
+            if isinstance(draft_catalog, dict)
+            else current
         )
-        if payload is not None
-        else current
-    )
+    catalog = reconcile_codex_catalog_update(current, proposed)
     applied = service.apply(catalog)
+    draft_service.clear()
     _invalidate_runtime_caches()
     return {
         "message": "Catalog applied to runtime settings.",
@@ -1323,20 +1502,20 @@ async def fetch_models_from_provider(payload: FetchModelsPayload):
         )
 
     api_key = payload.api_key
-    if api_key == CATALOG_SECRET_MASK and payload.profile_id:
-        llm_service = get_model_catalog_service().load().get("services", {}).get("llm", {})
+    api_format = (payload.api_format or "").strip().lower()
+    if payload.profile_id and (api_key == CATALOG_SECRET_MASK or not api_format):
+        service = get_model_catalog_service().load().get("services", {}).get(payload.service, {})
         profile = next(
-            (
-                item
-                for item in llm_service.get("profiles", [])
-                if item.get("id") == payload.profile_id
-            ),
+            (item for item in service.get("profiles", []) if item.get("id") == payload.profile_id),
             None,
         )
-        api_key = profile.get("api_key") if profile else None
+        if api_key == CATALOG_SECRET_MASK:
+            api_key = profile.get("api_key") if profile else None
+        if not api_format and profile:
+            api_format = str(profile.get("api_format") or "")
 
     try:
-        model_ids = await fetch_llm_models(binding, base_url, api_key)
+        model_ids = await fetch_llm_models(binding, base_url, api_key, api_format or "auto")
     except Exception as exc:  # noqa: BLE001 — surface any provider error as 502
         logger.exception("Failed to fetch models from %s", base_url)
         raise HTTPException(
@@ -1345,6 +1524,25 @@ async def fetch_models_from_provider(payload: FetchModelsPayload):
         ) from exc
 
     return {"models": [{"id": model_id, "name": model_id} for model_id in model_ids]}
+
+
+@router.post("/model-capabilities")
+async def resolve_model_capabilities(payload: ModelCapabilitiesQuery):
+    """What the built-in capability tables assume for one provider/model pair.
+
+    The settings UI shows these as the value "Auto" resolves to next to each
+    per-model override, so a user can see what they are overriding.
+    """
+    _require_settings_admin()
+    from deeptutor.services.llm.capabilities import effective_capabilities
+
+    binding = (payload.binding or "").strip().lower() or "openai"
+    model = (payload.model or "").strip()
+    return {
+        "binding": binding,
+        "model": model,
+        "defaults": effective_capabilities(binding, model),
+    }
 
 
 @router.put("/theme")
@@ -1465,7 +1663,7 @@ async def update_sidebar_nav_order(update: SidebarNavOrderUpdate):
 
 @router.put("/enabled-tools")
 async def update_enabled_tools(update: EnabledToolsUpdate):
-    sanitized = _sanitize_enabled_tools(update.enabled_tools)
+    sanitized = sanitize_enabled_tools(update.enabled_tools)
     patch_ui_settings(enabled_optional_tools=sanitized)
     return {"enabled_optional_tools": sanitized}
 
@@ -1475,8 +1673,10 @@ async def start_service_test(service: str, payload: CatalogPayload | None = None
     _require_settings_admin()
     catalog = None
     if payload is not None:
-        current = get_model_catalog_service().load()
+        catalog_service = get_model_catalog_service()
+        current = catalog_service.load()
         catalog = restore_catalog_secrets(payload.catalog, current)
+        catalog = catalog_service.resolve_connections(catalog)
     run = get_config_test_runner().start(service, catalog)
     return {"run_id": run.id}
 

@@ -25,10 +25,12 @@ from deeptutor.services.generation_http import (
 )
 from deeptutor.services.imagegen import generate_image
 from deeptutor.services.imagegen.adapters.chat_completions import ChatCompletionsImagegenAdapter
+from deeptutor.services.imagegen.adapters.dashscope import DashScopeImagegenAdapter
 from deeptutor.services.imagegen.adapters.openai_compat import OpenAICompatImagegenAdapter
 from deeptutor.services.imagegen.config import ImagegenConfig
 from deeptutor.services.videogen import generate_video, probe_video
 from deeptutor.services.videogen.adapters.async_task import AsyncTaskVideogenAdapter
+from deeptutor.services.videogen.adapters.dashscope import DashScopeVideogenAdapter
 from deeptutor.services.videogen.config import VideogenConfig
 
 
@@ -147,6 +149,98 @@ async def test_imagegen_adapter_raises_on_http_error(monkeypatch: pytest.MonkeyP
         await OpenAICompatImagegenAdapter().generate("x", config)
 
 
+@pytest.mark.asyncio
+async def test_dashscope_imagegen_task_polls_and_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def post_router(url: str, _kwargs: Any) -> httpx.Response:
+        assert url == "https://dashscope.aliyuncs.com/api/v1/services/aigc/image-synthesis"
+        return httpx.Response(200, json={"output": {"task_id": "image-task"}})
+
+    def get_router(url: str, _kwargs: Any) -> httpx.Response:
+        if url.endswith("/tasks/image-task"):
+            return httpx.Response(
+                200,
+                json={
+                    "output": {
+                        "task_status": "SUCCEEDED",
+                        "results": [{"url": "https://cdn.example.com/image.png"}],
+                    }
+                },
+            )
+        return httpx.Response(200, content=b"IMAGEDATA", headers={"content-type": "image/png"})
+
+    captured = _patch_http(monkeypatch, post=post_router, get=get_router)
+    config = ImagegenConfig(
+        model="wanx2.1-t2i-turbo",
+        provider_name="dashscope",
+        adapter="dashscope",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        api_key="dash-key",
+        size="1024x1024",
+        poll_interval=0.0,
+    )
+
+    images = await DashScopeImagegenAdapter().generate("a cat", config, n=2)
+
+    assert images == [(b"IMAGEDATA", "image/png")]
+    post = captured["posts"][0]
+    assert post["headers"]["X-DashScope-Async"] == "enable"
+    assert post["headers"]["Authorization"] == "Bearer dash-key"
+    assert post["json"] == {
+        "model": "wanx2.1-t2i-turbo",
+        "input": {"prompt": "a cat"},
+        "parameters": {"n": 2, "size": "1024*1024"},
+    }
+    assert captured["gets"][0]["url"] == ("https://dashscope.aliyuncs.com/api/v1/tasks/image-task")
+    assert captured["gets"][1]["url"] == "https://cdn.example.com/image.png"
+
+
+@pytest.mark.asyncio
+async def test_dashscope_imagegen_task_failure_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def post_router(url: str, _kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json={"output": {"task_id": "image-failed"}})
+
+    failed = httpx.Response(
+        200,
+        json={"output": {"task_status": "FAILED", "message": "content policy blocked"}},
+    )
+    _patch_http(monkeypatch, post=post_router, get=failed)
+    config = ImagegenConfig(
+        model="wanx2.1-t2i-turbo",
+        adapter="dashscope",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        api_key="dash-key",
+        poll_interval=0.0,
+    )
+
+    with pytest.raises(GenerationProviderError, match="content policy blocked"):
+        await DashScopeImagegenAdapter().generate("unsafe prompt", config)
+
+
+@pytest.mark.asyncio
+async def test_dashscope_imagegen_http200_protocol_error_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = httpx.Response(200, json={"code": "InvalidParameter", "message": "unsupported size"})
+    _patch_http(monkeypatch, post=post)
+    config = ImagegenConfig(
+        model="wanx2.1-t2i-turbo",
+        adapter="dashscope",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        api_key="dash-key",
+        size="1x1",
+    )
+
+    with pytest.raises(
+        GenerationProviderError,
+        match=r"DashScope image task submission failed \(InvalidParameter\): unsupported size",
+    ):
+        await DashScopeImagegenAdapter().generate("x", config)
+
+
 # ── videogen adapter ────────────────────────────────────────────────────────
 
 
@@ -196,6 +290,75 @@ async def test_videogen_adapter_raises_on_failed_task(monkeypatch: pytest.Monkey
     config = VideogenConfig(model="m", base_url="https://x/v3", api_key="k", poll_interval=0.0)
     with pytest.raises(GenerationProviderError, match="content blocked"):
         await AsyncTaskVideogenAdapter().generate("x", config)
+
+
+@pytest.mark.asyncio
+async def test_dashscope_videogen_task_polls_and_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress_messages: list[str] = []
+
+    async def progress(message: str) -> None:
+        progress_messages.append(message)
+
+    def post_router(url: str, kwargs: Any) -> httpx.Response:
+        assert url == "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation"
+        assert kwargs["headers"]["X-DashScope-Async"] == "enable"
+        assert kwargs["json"] == {
+            "model": "wanx2.1-t2v-turbo",
+            "input": {"prompt": "a wave"},
+            "parameters": {"ratio": "16:9", "duration": 5, "resolution": "720p"},
+        }
+        return httpx.Response(200, json={"output": {"task_id": "video-task"}})
+
+    def get_router(url: str, _kwargs: Any) -> httpx.Response:
+        if url.endswith("/tasks/video-task"):
+            return httpx.Response(
+                200,
+                json={"output": {"task_status": "SUCCEEDED", "video_url": "https://cdn/v.mp4"}},
+            )
+        return httpx.Response(200, content=b"MP4DATA", headers={"content-type": "video/mp4"})
+
+    _patch_http(monkeypatch, post=post_router, get=get_router)
+    config = VideogenConfig(
+        model="wanx2.1-t2v-turbo",
+        provider_name="dashscope",
+        adapter="dashscope",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        api_key="dash-key",
+        aspect_ratio="16:9",
+        duration="5",
+        resolution="720p",
+        poll_interval=0.0,
+    )
+
+    video, content_type = await DashScopeVideogenAdapter().generate(
+        "a wave", config, progress=progress
+    )
+
+    assert video == b"MP4DATA"
+    assert content_type == "video/mp4"
+    assert progress_messages[0].startswith("Submitted DashScope video task")
+
+
+@pytest.mark.asyncio
+async def test_dashscope_videogen_http200_protocol_error_is_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = httpx.Response(200, json={"success": False, "message": "model quota exceeded"})
+    _patch_http(monkeypatch, post=post)
+    config = VideogenConfig(
+        model="wanx2.1-t2v-turbo",
+        adapter="dashscope",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+        api_key="dash-key",
+    )
+
+    with pytest.raises(
+        GenerationProviderError,
+        match=r"DashScope video task submission failed \(unknown\): model quota exceeded",
+    ):
+        await DashScopeVideogenAdapter().generate("x", config)
 
 
 # ── catalog resolution ──────────────────────────────────────────────────────
@@ -278,6 +441,25 @@ def test_resolve_videogen_config_uses_async_task_adapter() -> None:
     assert cfg.aspect_ratio == "9:16"
 
 
+def test_resolve_dashscope_media_configs() -> None:
+    catalog = _media_catalog()
+    catalog["services"]["imagegen"]["profiles"][0]["binding"] = "aliyun"
+    catalog["services"]["imagegen"]["profiles"][0]["models"][0]["model"] = "wanx2.1-t2i-turbo"
+    catalog["services"]["videogen"]["profiles"][0]["binding"] = "bailian"
+    catalog["services"]["videogen"]["profiles"][0]["models"][0]["model"] = "wanx2.1-t2v-turbo"
+
+    image = resolve_imagegen_runtime_config(catalog=catalog)
+    video = resolve_videogen_runtime_config(catalog=catalog)
+
+    assert image.provider_name == "dashscope"
+    assert image.adapter == "dashscope"
+    assert image.model == "wanx2.1-t2i-turbo"
+    assert video.provider_name == "dashscope"
+    assert video.adapter == "dashscope"
+    assert video.model == "wanx2.1-t2v-turbo"
+    assert image.base_url == video.base_url == "https://dashscope.aliyuncs.com/api/v1"
+
+
 def test_resolve_imagegen_config_raises_without_model() -> None:
     catalog = {"version": 1, "services": {"imagegen": {"profiles": []}}}
     with pytest.raises(ValueError, match="No active image-generation model"):
@@ -300,7 +482,7 @@ async def test_generate_image_facade(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_imagegen_tool_saves_public_artifact(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The tool must write generated bytes to a path /api/outputs can serve.
+    """The tool must write generated bytes to a path /files/outputs can serve.
 
     Regression: media landed under ``<task>/media`` which was not on the
     public-output allowlist, so artifacts collected empty ("no saved files").
@@ -323,7 +505,7 @@ async def test_imagegen_tool_saves_public_artifact(monkeypatch: pytest.MonkeyPat
         assert result.success, result.content
         artifacts = result.metadata.get("artifacts") or []
         assert artifacts, "tool produced no artifacts"
-        assert artifacts[0]["url"].startswith("/api/outputs/")
+        assert artifacts[0]["url"].startswith("/files/outputs/")
         assert artifacts[0]["mime_type"] == "image/png"
     finally:
         shutil.rmtree(
@@ -354,7 +536,7 @@ async def test_imagegen_tool_without_injected_workspace_uses_public_fallback(
         assert result.success, result.content
         artifacts = result.metadata.get("artifacts") or []
         assert artifacts, "tool produced no artifacts"
-        assert artifacts[0]["url"].startswith("/api/outputs/")
+        assert artifacts[0]["url"].startswith("/files/outputs/")
         assert "/workspace/chat/chat/media_gen/media/" in artifacts[0]["url"]
     finally:
         shutil.rmtree(task_root, ignore_errors=True)
@@ -396,7 +578,7 @@ async def test_videogen_tool_forwards_progress_and_saves(monkeypatch: pytest.Mon
         assert any("rendering" in message for _, message in events), events
         artifacts = result.metadata.get("artifacts") or []
         assert artifacts, "tool produced no artifacts"
-        assert artifacts[0]["url"].startswith("/api/outputs/")
+        assert artifacts[0]["url"].startswith("/files/outputs/")
         assert artifacts[0]["mime_type"] == "video/mp4"
     finally:
         shutil.rmtree(

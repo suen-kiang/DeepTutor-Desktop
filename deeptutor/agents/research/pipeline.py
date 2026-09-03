@@ -54,7 +54,14 @@ from deeptutor.agents.research.data_structures import (
     TopicStatus,
 )
 from deeptutor.agents.research.utils.citation_manager import CitationManager
-from deeptutor.core.agentic import (
+from deeptutor.core.context import Attachment, UnifiedContext
+from deeptutor.core.trace import (
+    build_trace_metadata,
+    derive_trace_metadata,
+    merge_trace_metadata,
+    new_call_id,
+)
+from deeptutor.runtime.agentic import (
     DispatchOutcome,
     LabeledStepResult,
     LabelProtocol,
@@ -68,18 +75,11 @@ from deeptutor.core.agentic import (
     run_agentic_loop,
     run_labeled_step,
 )
-from deeptutor.core.agentic.tool_dispatch import (
+from deeptutor.runtime.agentic.tool_dispatch import (
     MAX_PARALLEL_TOOL_CALLS,
 )
-from deeptutor.core.context import Attachment, UnifiedContext
-from deeptutor.core.stream_bus import StreamBus
-from deeptutor.core.trace import (
-    build_trace_metadata,
-    derive_trace_metadata,
-    merge_trace_metadata,
-    new_call_id,
-)
 from deeptutor.runtime.registry.tool_registry import get_tool_registry
+from deeptutor.runtime.stream_bus import StreamBus
 from deeptutor.services.config import parse_language
 from deeptutor.services.llm import get_llm_config, prepare_multimodal_messages
 from deeptutor.services.path_service import get_path_service
@@ -240,6 +240,7 @@ DEFAULT_REPORT_OUTLINE_MAX_TOKENS = 2000
 DEFAULT_REPORT_INTRO_MAX_TOKENS = 3000
 DEFAULT_REPORT_SECTION_MAX_TOKENS = 6000
 DEFAULT_REPORT_CONCLUSION_MAX_TOKENS = 3000
+DEFAULT_REPORT_STEP_MAX_ATTEMPTS = 3
 DEFAULT_INITIAL_SUBTOPICS = 5
 DEFAULT_MAX_PARALLEL_TOPICS = 3
 DEFAULT_QUEUE_MAX_LENGTH = 8
@@ -291,7 +292,7 @@ class ResearchPipeline:
     """One-shot orchestrator: instantiate per turn, call :meth:`run` once.
 
     The pipeline owns control flow and per-phase prompt assembly; every
-    LLM call goes through :mod:`deeptutor.core.agentic` primitives. The
+    LLM call goes through :mod:`deeptutor.runtime.agentic` primitives. The
     legacy ``DynamicTopicQueue`` + :class:`CitationManager` are reused
     verbatim as the in-flight scratchpad and citation registry.
     """
@@ -420,6 +421,8 @@ class ResearchPipeline:
             api_version=self.api_version,
             extra_headers=self.extra_headers or None,
             reasoning_effort=self.reasoning_effort,
+            wire_api=getattr(self.llm_config, "wire_api", None) or "auto",
+            api_format=getattr(self.llm_config, "api_format", None) or "auto",
         )
 
         self.registry = get_tool_registry()
@@ -1205,10 +1208,14 @@ class ResearchPipeline:
             )
             section_texts.append(title_block)
 
+        # The separator must be on the wire before ``_write_intro`` emits its
+        # first heading. Emitting it afterwards produced the literal live
+        # stream ``# Report title## 1. Introduction`` even though the final
+        # assembled response was normalized correctly.
+        if section_texts:
+            await self._stream_report_separator(stream)
         intro = await self._write_intro(topic=topic, outline=outline, stream=stream, client=client)
         if intro:
-            if section_texts:
-                await self._stream_report_separator(stream)
             section_texts.append(intro)
 
         section_bodies: list[str] = []
@@ -1711,8 +1718,13 @@ class ResearchPipeline:
         max_tokens: int,
         extra_meta: dict[str, Any] | None = None,
     ) -> str:
-        """Common runner for the four report sub-phases: one labeled step
-        with body streaming live to the chat bubble + a sub-trace card."""
+        """Run and validate one report sub-phase, retrying partial streams.
+
+        Report prose is buffered until the call is known to be complete. This
+        prevents a timed-out first attempt from leaking half a section into
+        the final bubble before a retry starts. Progress / reasoning traces
+        still stream live, so long report calls remain observable.
+        """
         messages = self._build_system_user_messages(system_prompt, user_prompt)
         trace_extra = dict(extra_meta or {})
         iter_meta = self._build_simple_trace_meta(
@@ -1735,18 +1747,94 @@ class ResearchPipeline:
             trace_group="stage",
             **trace_extra,
         )
-        step = await self._run_labeled_step(
-            client=client,
-            messages=messages,
-            tool_schemas=None,
-            protocol=protocol,
-            stream=stream,
-            stage="reporting",
-            iter_meta=iter_meta,
-            max_tokens=max_tokens,
-            final_meta=final_meta,
+        expected_label = protocol.allowed[0]
+        last_reason = "empty response"
+        for attempt in range(1, DEFAULT_REPORT_STEP_MAX_ATTEMPTS + 1):
+            body = ""
+            try:
+                step = await self._run_labeled_step(
+                    client=client,
+                    messages=messages,
+                    tool_schemas=None,
+                    protocol=protocol,
+                    stream=stream,
+                    stage="reporting",
+                    iter_meta=iter_meta,
+                    max_tokens=max_tokens,
+                    # Buffer body text until validation succeeds. Passing
+                    # ``final_meta`` here would stream a failed attempt and
+                    # make a clean retry impossible without duplicated prose.
+                    final_meta=None,
+                )
+                body = (step.text or "").strip()
+                last_reason = _report_step_incomplete_reason(
+                    step,
+                    expected_label=expected_label,
+                    body=body,
+                )
+                if not last_reason:
+                    await stream.content(
+                        body,
+                        source=SOURCE,
+                        stage="reporting",
+                        metadata=merge_trace_metadata(
+                            final_meta,
+                            {"trace_kind": "llm_chunk", "report_attempt": attempt},
+                        ),
+                    )
+                    return body
+            except Exception as exc:
+                last_reason = f"provider error: {type(exc).__name__}"
+                if attempt >= DEFAULT_REPORT_STEP_MAX_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Report step %s attempt %d/%d failed: %s",
+                    call_id_root,
+                    attempt,
+                    DEFAULT_REPORT_STEP_MAX_ATTEMPTS,
+                    exc,
+                )
+
+            if attempt < DEFAULT_REPORT_STEP_MAX_ATTEMPTS:
+                await stream.progress(
+                    self._t(
+                        "labels.report_retry",
+                        default="Report section was incomplete; retrying.",
+                    ),
+                    source=SOURCE,
+                    stage="reporting",
+                    metadata={
+                        "trace_kind": "warning",
+                        "report_retry": True,
+                        "report_attempt": attempt,
+                        "report_retry_reason": last_reason,
+                        **trace_extra,
+                    },
+                )
+                messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": f"``{expected_label}``\n{body}" if body else "",
+                        },
+                        {
+                            "role": "user",
+                            "content": self._t(
+                                "report.retry_complete",
+                                default=(
+                                    "The previous report part was empty or truncated. "
+                                    "Regenerate the complete part from its ## heading, "
+                                    "follow the required label protocol, and finish every sentence."
+                                ),
+                            ),
+                        },
+                    ]
+                )
+
+        raise RuntimeError(
+            f"Research report step {call_id_root!r} remained incomplete after "
+            f"{DEFAULT_REPORT_STEP_MAX_ATTEMPTS} attempts ({last_reason})."
         )
-        return (step.text or "").strip()
 
     def _render_section_evidence(
         self,
@@ -2075,6 +2163,37 @@ class ResearchPipeline:
 # ---------------------------------------------------------------------------
 
 _REPORT_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_REPORT_SECTION_HEADING_RE = re.compile(r"\A##\s+\d+\.\s*\S")
+
+
+def _report_step_incomplete_reason(
+    step: LabeledStepResult,
+    *,
+    expected_label: str,
+    body: str,
+) -> str:
+    """Return why a generated report part is unsafe to persist, or ``""``.
+
+    Deep Research report calls are stricter than ordinary chat: an empty
+    formal channel, a token-limit finish, or the labeled-step idle escape
+    means the report is incomplete even though the provider call itself did
+    not raise. Every report part must also contain its numbered H2 heading.
+    """
+
+    if step.label != expected_label:
+        return f"expected {expected_label} label, got {step.label or 'none'}"
+    if step.stream_idle_timeout:
+        return "provider stream went idle before an explicit finish"
+    finish_reason = (step.finish_reason or "").strip().lower()
+    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        return f"provider stopped at its output limit ({finish_reason})"
+    if len(body) < 80:
+        return f"body is too short ({len(body)} characters)"
+    if not _REPORT_SECTION_HEADING_RE.match(body):
+        return "numbered report heading is missing"
+    return ""
+
+
 _REPORT_STOPWORDS = {
     "a",
     "an",
@@ -2836,7 +2955,7 @@ class _RephraseLoopHost:
         )
 
         ask_user = (dispatch.pause_payload or {}).get("ask_user") or {}
-        waiter = self._context.metadata.get("wait_for_user_reply")
+        waiter = self._context.runtime.wait_for_user_reply
         if not callable(waiter):
             return False
         raw_reply = await waiter()

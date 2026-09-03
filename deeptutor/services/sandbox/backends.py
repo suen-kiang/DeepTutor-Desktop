@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import locale
 import os
 from pathlib import Path
 import shutil
+import signal
 import sys
 
 import httpx
@@ -227,10 +229,15 @@ class BwrapBackend(SandboxBackend):
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=sys.platform != "win32",
             )
         except FileNotFoundError:
             return ExecResult(error="bwrap not found on host")
-        return await _communicate(process, request.limits.timeout_s)
+        return await _communicate(
+            process,
+            request.limits.timeout_s,
+            request.limits.max_output_chars,
+        )
 
     async def health(self) -> tuple[bool, str]:
         if shutil.which(self._bwrap) is None:
@@ -250,6 +257,47 @@ class RestrictedSubprocessBackend(SandboxBackend):
     level = IsolationLevel.APPLICATION
 
     _SAFE_ENV_KEYS = ("PATH", "PATHEXT", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+
+    def __init__(
+        self,
+        *,
+        venv_path: str | Path | None = None,
+        inherit_virtualenv: bool = True,
+    ) -> None:
+        """Keep model-authored ``python`` and ``pip`` on one interpreter.
+
+        Desktop installs run DeepTutor from a virtual environment but can
+        inherit a host ``PATH`` whose first Python belongs to MSYS, Conda, or a
+        system install.  Prepending the environment that launched DeepTutor
+        prevents a bare ``pip install`` followed by ``python -c`` from silently
+        targeting two different environments.
+        """
+        if venv_path is not None:
+            candidate = Path(venv_path).resolve()
+        elif inherit_virtualenv and sys.prefix != sys.base_prefix:
+            candidate = Path(sys.prefix).resolve()
+        else:
+            candidate = None
+        self._venv_path = candidate if candidate is not None and candidate.is_dir() else None
+
+    def _build_env(self, request_env: dict[str, str]) -> dict[str, str]:
+        env = {key: os.environ[key] for key in self._SAFE_ENV_KEYS if key in os.environ}
+        env.update(request_env)
+        if self._venv_path is None:
+            return env
+
+        venv = str(self._venv_path)
+        venv_bin = str(self._venv_path / ("Scripts" if sys.platform == "win32" else "bin"))
+        base_path = env.get("PATH") or ""
+        normalized_venv_bin = os.path.normcase(os.path.normpath(venv_bin))
+        path_entries = [
+            entry
+            for entry in base_path.split(os.pathsep)
+            if entry and os.path.normcase(os.path.normpath(entry)) != normalized_venv_bin
+        ]
+        env["PATH"] = os.pathsep.join([venv_bin, *path_entries])
+        env["VIRTUAL_ENV"] = venv
+        return env
 
     @staticmethod
     def _powershell_executable() -> str:
@@ -278,8 +326,7 @@ class RestrictedSubprocessBackend(SandboxBackend):
         )
 
     async def exec(self, request: ExecRequest) -> ExecResult:
-        env = {k: os.environ[k] for k in self._SAFE_ENV_KEYS if k in os.environ}
-        env.update(request.env)
+        env = self._build_env(request.env)
         cwd = request.workdir or None
         try:
             if request.argv:
@@ -289,6 +336,7 @@ class RestrictedSubprocessBackend(SandboxBackend):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=sys.platform != "win32",
                 )
             elif sys.platform == "win32":
                 process = await asyncio.create_subprocess_exec(
@@ -301,6 +349,7 @@ class RestrictedSubprocessBackend(SandboxBackend):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=sys.platform != "win32",
                 )
             else:
                 process = await asyncio.create_subprocess_shell(
@@ -309,45 +358,137 @@ class RestrictedSubprocessBackend(SandboxBackend):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=sys.platform != "win32",
                 )
         except Exception as exc:
             return ExecResult(error=f"{type(exc).__name__}: {exc}")
-        return await _communicate(process, request.limits.timeout_s)
+        return await _communicate(
+            process,
+            request.limits.timeout_s,
+            request.limits.max_output_chars,
+        )
 
 
-async def _communicate(process: asyncio.subprocess.Process, timeout_s: int) -> ExecResult:
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        if sys.platform == "win32" and process.pid:
-            # ``Process.kill`` only terminates powershell.exe; taskkill's /T
-            # flag also tears down python/compiler children started by it.
-            try:
-                killer = await asyncio.create_subprocess_exec(
-                    "taskkill",
-                    "/PID",
-                    str(process.pid),
-                    "/T",
-                    "/F",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(killer.wait(), timeout=5.0)
-            except OSError:
-                # Extremely unusual (PATH corruption / stripped-down host),
-                # but still return a timeout result instead of masking it.
-                process.kill()
-        else:
+async def _capture_limited(
+    stream: asyncio.StreamReader | None,
+    max_chars: int,
+) -> bytes:
+    """Drain a process stream while retaining bounded head and tail samples."""
+    if stream is None:
+        return b""
+    if max_chars <= 0:
+        while await stream.read(64 * 1024):
+            pass
+        return b""
+
+    head = bytearray()
+    tail = bytearray()
+    total_bytes = 0
+    while True:
+        chunk = await stream.read(64 * 1024)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        head_capacity = max_chars - len(head)
+        if head_capacity:
+            accepted = chunk[:head_capacity]
+            head.extend(accepted)
+            chunk = chunk[len(accepted) :]
+        if chunk:
+            tail.extend(chunk)
+            if len(tail) > max_chars:
+                del tail[: len(tail) - max_chars]
+
+    if total_bytes <= max_chars:
+        return bytes(head)
+
+    prefix_size = max_chars // 2
+    suffix_size = max_chars - prefix_size
+    prefix = head[:prefix_size]
+    suffix = tail[-suffix_size:] if suffix_size else bytearray()
+    dropped = total_bytes - len(prefix) - len(suffix)
+    marker = f"\n\n... ({dropped:,} bytes truncated) ...\n\n".encode()
+    return bytes(prefix) + marker + bytes(suffix)
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+
+    if sys.platform != "win32":
+        killed_group = False
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            killed_group = True
+        except (ProcessLookupError, PermissionError):
+            pass
+        if not killed_group:
             process.kill()
+        return
+
+    # ``Process.kill`` only terminates powershell.exe; taskkill's /T flag also
+    # tears down python/compiler children started by it.
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(killer.wait(), timeout=5.0)
+    except OSError:
+        # Extremely unusual (PATH corruption / stripped-down host), but still
+        # return a timeout result instead of masking it.
+        process.kill()
+
+
+async def _communicate(
+    process: asyncio.subprocess.Process,
+    timeout_s: int,
+    max_output_chars: int,
+) -> ExecResult:
+    stdout_task = asyncio.create_task(_capture_limited(process.stdout, max_output_chars))
+    stderr_task = asyncio.create_task(_capture_limited(process.stderr, max_output_chars))
+    wait_task = asyncio.create_task(process.wait())
+    try:
+        _, stdout, stderr = await asyncio.wait_for(
+            asyncio.gather(wait_task, stdout_task, stderr_task),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        for task in (wait_task, stdout_task, stderr_task):
+            task.cancel()
+        await asyncio.gather(wait_task, stdout_task, stderr_task, return_exceptions=True)
+        await _terminate_process_tree(process)
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(process.wait(), timeout=5.0)
         return ExecResult(timed_out=True, exit_code=124)
     return ExecResult(
-        stdout=stdout.decode("utf-8", errors="replace") if stdout else "",
-        stderr=stderr.decode("utf-8", errors="replace") if stderr else "",
+        stdout=_decode_process_output(stdout),
+        stderr=_decode_process_output(stderr),
         exit_code=process.returncode if process.returncode is not None else 0,
     )
+
+
+def _decode_process_output(data: bytes | None) -> str:
+    """Decode native-process output without turning Windows errors into mojibake."""
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if sys.platform == "win32":
+        for encoding in (locale.getpreferredencoding(False), "mbcs"):
+            try:
+                return data.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+    return data.decode("utf-8", errors="replace")
 
 
 __all__ = [

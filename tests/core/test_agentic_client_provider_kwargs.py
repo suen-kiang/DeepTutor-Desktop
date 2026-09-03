@@ -4,12 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from deeptutor.core.agentic import client as agentic_client
-from deeptutor.core.agentic.client import (
+from deeptutor.runtime.agentic import client as agentic_client
+from deeptutor.runtime.agentic.client import (
     _NATIVE_ADAPTER_BUILDERS,
     _NATIVE_TOOL_BACKENDS,
     LLMClientConfig,
     _ProviderOpenAIAdapter,
+    _ProviderOpenAIStream,
     build_completion_kwargs,
     build_openai_client,
     can_use_native_tool_calling,
@@ -89,6 +90,34 @@ def test_agentic_kwargs_preserve_legacy_shape_without_binding() -> None:
     )
 
     assert kwargs == {"temperature": 0.2, "max_tokens": 256}
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_exposes_final_reasoning_content() -> None:
+    class FakeProvider:
+        async def chat_stream(self, **_kwargs):
+            return LLMResponse(
+                content="answer",
+                finish_reason="stop",
+                reasoning_content="private reasoning",
+            )
+
+    stream = _ProviderOpenAIStream(
+        provider=FakeProvider(),
+        messages=[],
+        tools=None,
+        model="deepseek-v4-pro",
+        max_tokens=32,
+        temperature=0.7,
+        reasoning_effort=None,
+        tool_choice=None,
+        extra_kwargs={},
+    )
+
+    chunks = [chunk async for chunk in stream]
+
+    final_choice = chunks[-1].choices[0]
+    assert final_choice.provider_specific_fields["reasoning_content"] == "private reasoning"
 
 
 @pytest.mark.parametrize("binding", ["moonshot", "openai", "custom"])

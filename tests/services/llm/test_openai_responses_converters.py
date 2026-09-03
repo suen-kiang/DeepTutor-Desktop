@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from deeptutor.services.llm.provider_core.openai_responses import (
     adapt_chat_kwargs_to_responses,
+    convert_messages,
 )
 
 
@@ -52,3 +53,33 @@ class TestAdaptChatKwargsToResponses:
         source = {"max_completion_tokens": 8192, "temperature": 0.2}
         adapt_chat_kwargs_to_responses(source)
         assert source == {"max_completion_tokens": 8192, "temperature": 0.2}
+
+
+class TestConvertMessages:
+    def test_replays_persisted_native_output_items(self) -> None:
+        native_items = [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [{"type": "reasoning_text", "text": "Need to inspect the MCP status."}],
+                "summary": [],
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "previous answer"}],
+            },
+        ]
+
+        _instructions, input_items = convert_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "previous answer",
+                    "_provider_response_state": {"responses_output_items": native_items},
+                }
+            ]
+        )
+
+        assert input_items == native_items

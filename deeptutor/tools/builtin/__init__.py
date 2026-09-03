@@ -8,23 +8,14 @@ import logging
 import sys
 from typing import Any
 
-from deeptutor.capabilities.ima import IMA_TOOL_TYPES
-from deeptutor.capabilities.marginnote4 import MARGINNOTE_TOOL_TYPES
-from deeptutor.capabilities.mastery import MASTERY_TOOL_TYPES
-from deeptutor.capabilities.obsidian import OBSIDIAN_TOOL_TYPES
-from deeptutor.capabilities.reading import READING_TOOL_TYPES
-from deeptutor.capabilities.setup import SETUP_TOOL_TYPES
-from deeptutor.capabilities.solve import SOLVE_TOOL_TYPES
-from deeptutor.capabilities.subagent import SUBAGENT_TOOL_TYPES
 from deeptutor.core.tool_protocol import BaseTool, ToolDefinition, ToolParameter, ToolResult
 from deeptutor.knowledge.manifest import KB_FILES_DEFAULT_LIMIT, KB_FILES_MAX_LIMIT
-from deeptutor.tools.exec_tool import ExecTool
-from deeptutor.tools.media_gen_tool import ImagegenTool, VideogenTool
-from deeptutor.tools.partner_memory import (
+from deeptutor.tools.builtin_specs import (
+    BUILTIN_TOOL_NAMES,
+    BUILTIN_TOOL_SPECS,
     PARTNER_BUILTIN_TOOL_NAMES,
-    PartnerMemorizeTool,
-    PartnerReadTool,
-    PartnerSearchTool,
+    TOOL_ALIASES,
+    LazyBuiltinToolTypes,
 )
 from deeptutor.tools.prompting import load_prompt_hints
 from deeptutor.tools.question_bank import ACTIONS as QB_ACTIONS
@@ -340,10 +331,14 @@ class CodeExecutionTool(_PromptHintsMixin, BaseTool):
             name="code_execution",
             description=(
                 "Run a code snippet in an isolated sandbox and return its "
-                "stdout/stderr. Pass complete, ready-to-run source in `code` "
-                "and pick `language` (python, c, or cpp). Use for calculation, "
-                "algorithm checking, and numerical verification — print results "
-                "to stdout. Not a substitute for explaining your reasoning."
+                "stdout/stderr plus any files generated in the workspace. Pass "
+                "complete, ready-to-run source in `code` and pick `language` "
+                "(python, c, or cpp). Use it for calculation, data processing, "
+                "and code-generated deliverables instead of embedding source in "
+                "an exec command. Preserve explicit quantities and scope; after "
+                "failure or a missing artifact, diagnose the cause and change "
+                "strategy rather than retrying identical code. Print concise "
+                "results to stdout."
             ),
             parameters=[
                 ToolParameter(
@@ -713,8 +708,8 @@ class ReadSourceTool(_PromptHintsMixin, BaseTool):
     """Load the full text of an attached Space source by its manifest id.
 
     The chat pipeline auto-enables this tool whenever a turn has any non-image
-    attached source (notebook record, book reference, history session,
-    question-bank entry, or document attachment). The per-turn full-text
+    attached source (notebook record, book reference, reading unit, history
+    session, question-bank entry, or document attachment). The per-turn full-text
     payload is carried in ``context.metadata["source_index"]`` as
     ``{source_id: str}`` and injected into the tool call by
     ``_augment_tool_kwargs``. The tool itself stays stateless.
@@ -737,8 +732,8 @@ class ReadSourceTool(_PromptHintsMixin, BaseTool):
                     description=(
                         "The source identifier from the Attached Sources "
                         "manifest. Begins with one of: nb- (notebook record), "
-                        "bk- (book reference), hs- (history session), qb- "
-                        "(question-bank entry), at- (document attachment)."
+                        "bk- (book reference), rd- (reading unit), hs- (history "
+                        "session), qb- (question-bank entry), at- (document attachment)."
                     ),
                 ),
             ],
@@ -1708,73 +1703,17 @@ class CronTool(_PromptHintsMixin, BaseTool):
         return ToolResult(content=outcome.text, success=outcome.ok, metadata=outcome.meta)
 
 
-BUILTIN_TOOL_TYPES: tuple[type[BaseTool], ...] = (
-    BrainstormTool,
-    RAGTool,
-    KbFilesTool,
-    WebSearchTool,
-    CodeExecutionTool,
-    ReasonTool,
-    PaperSearchToolWrapper,
-    ReadSourceTool,
-    ReadMemoryTool,
-    WriteMemoryTool,
-    ReadSkillTool,
-    LoadToolsTool,
-    ExecTool,
-    WebFetchTool,
-    ListNotebookTool,
-    WriteNoteTool,
-    QuestionBankTool,
-    GithubTool,
-    AskUserTool,
-    CronTool,
-    # Image → GeoGebra figure reconstruction. User-toggleable in chat; the
-    # solve loop capability force-mounts it for diagram problems.
-    GeoGebraAnalysisTool,
-    # Text-to-image / text-to-video generation. User-toggleable + per-user
-    # grant-gated; the chat pipeline only mounts them when a model is configured.
-    ImagegenTool,
-    VideogenTool,
-    # Mastery Path + Solve + Obsidian tools — globally registered so schemas/API
-    # stay stable; the chat loop capabilities decide when to auto-mount them for
-    # a turn. Obsidian is a knowledge capability: when its vault is selected it
-    # runs the turn exclusively on these tools.
-    *MASTERY_TOOL_TYPES,
-    *SOLVE_TOOL_TYPES,
-    *OBSIDIAN_TOOL_TYPES,
-    *MARGINNOTE_TOOL_TYPES,
-    # Subagent consult tool — globally registered; the subagent knowledge
-    # capability runs the turn exclusively on it when a connected agent is the
-    # selected KB.
-    *SUBAGENT_TOOL_TYPES,
-    # Tencent IMA tools — globally registered; the IMA capability mounts them
-    # (additively, alongside rag) when a connected IMA library is selected.
-    *IMA_TOOL_TYPES,
-    # Immersive-reading tools — globally registered; the reading capability
-    # mounts them (additively) and binds the open material server-side, so they
-    # are inert on a turn with no document open.
-    *READING_TOOL_TYPES,
-    # Self-configuration tools — globally registered; the setup capability
-    # mounts them (additively) on a turn that is actually about configuration.
-    *SETUP_TOOL_TYPES,
-    # Partner-only memory + history tools. Globally registered so schemas/API
-    # stay stable, but never mounted in product chat: the partner runtime
-    # force-mounts them (and suppresses chat's read_memory/write_memory) on
-    # every partner turn. Deliberately absent from CONFIGURABLE_BUILTIN_TOOL_NAMES
-    # — they are mandatory, not owner-configurable.
-    PartnerReadTool,
-    PartnerMemorizeTool,
-    PartnerSearchTool,
-)
+# Compatibility surface for callers that enumerate implementation classes
+# (notably the Settings API).  The sequence itself is import-cheap; classes are
+# resolved one at a time while it is iterated.  Runtime registration uses the
+# descriptors directly and therefore does not iterate this sequence at boot.
+BUILTIN_TOOL_TYPES = LazyBuiltinToolTypes(BUILTIN_TOOL_SPECS)
 
 # No tools are parked right now. When a tool's implementation is being
 # redesigned, list its type here: it stays OUT of the runtime registry (the
 # chat agent cannot invoke it) while the settings page still surfaces it with
 # a "Coming soon" badge. Re-add to ``BUILTIN_TOOL_TYPES`` when ready to ship.
 COMING_SOON_TOOL_TYPES: tuple[type[BaseTool], ...] = ()
-
-BUILTIN_TOOL_NAMES: tuple[str, ...] = tuple(tool_type().name for tool_type in BUILTIN_TOOL_TYPES)
 
 COMING_SOON_TOOL_NAMES: tuple[str, ...] = tuple(
     tool_type().name for tool_type in COMING_SOON_TOOL_TYPES
@@ -1802,9 +1741,13 @@ USER_TOGGLEABLE_TOOL_NAMES: tuple[str, ...] = (
 # allowed) so an IM-facing partner can be denied e.g. memory access.
 # ``tool_composition.AUTO_MOUNTED_TOOLS`` is derived from this tuple, so the
 # two stay in lockstep; this ordering is the canonical display order for the
-# partner config UI. Capability-owned tools (mastery/solve/obsidian/subagent)
-# are intentionally absent — they are gated by capability activation, never by
-# this surface.
+# partner config UI. Capability-owned tools (the mastery *tutoring* tools,
+# solve/obsidian/subagent) are intentionally absent — they are gated by
+# capability activation, never by this surface. The four ``mastery_*``
+# navigation tools listed here are the exception that proves the rule: they
+# only read the atlas and propose a hand-off card, so they are ordinary
+# context-gated built-ins (gate: the learner has a topic) rather than part of
+# any capability.
 CONFIGURABLE_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "rag",
     "kb_files",
@@ -1822,15 +1765,34 @@ CONFIGURABLE_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "load_tools",
     "cron",
     "ask_user",
+    "mastery_topics",
+    "mastery_sessions",
+    "mastery_open_session",
+    "mastery_new_session",
 )
 
-TOOL_ALIASES: dict[str, tuple[str, dict[str, Any]]] = {
-    "rag_hybrid": ("rag", {"mode": "hybrid"}),
-    "rag_naive": ("rag", {"mode": "naive"}),
-    "rag_search": ("rag", {}),
-    "code_execute": ("code_execution", {}),
-    "run_code": ("code_execution", {}),
+_LAZY_CLASS_EXPORTS = {
+    "ExecTool": "deeptutor.tools.exec_tool:ExecTool",
+    "ImagegenTool": "deeptutor.tools.media_gen_tool:ImagegenTool",
+    "VideogenTool": "deeptutor.tools.media_gen_tool:VideogenTool",
+    "PartnerReadTool": "deeptutor.tools.partner_memory:PartnerReadTool",
+    "PartnerMemorizeTool": "deeptutor.tools.partner_memory:PartnerMemorizeTool",
+    "PartnerSearchTool": "deeptutor.tools.partner_memory:PartnerSearchTool",
+    "SubmitVisualizationTool": "deeptutor.visualizers.tool:SubmitVisualizationTool",
 }
+
+
+def __getattr__(name: str):
+    class_path = _LAZY_CLASS_EXPORTS.get(name)
+    if class_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    module_path, class_name = class_path.rsplit(":", 1)
+    value = getattr(importlib.import_module(module_path), class_name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "BUILTIN_TOOL_NAMES",

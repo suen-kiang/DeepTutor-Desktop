@@ -19,6 +19,7 @@ from deeptutor.tools.mastery_tool import (
     MasteryLeaveTool,
     MasteryPathsTool,
     MasteryQuizTool,
+    MasterySkipQuestionTool,
     MasteryStatusTool,
     MasterySwitchTool,
 )
@@ -224,6 +225,80 @@ async def test_grade_without_pending_fails(path_id):
 
 
 @pytest.mark.asyncio
+async def test_skip_question_unblocks_registration_without_credit(path_id):
+    await _build_basic(path_id)
+    status = json.loads((await MasteryStatusTool().execute(_mastery_path_id=path_id)).content)
+    kp_id = status["next"]["knowledge_point_id"]
+    first = json.loads(
+        (
+            await MasteryQuizTool().execute(
+                _mastery_path_id=path_id,
+                knowledge_point_id=kp_id,
+                question="First?",
+                expected_answer="right",
+            )
+        ).content
+    )
+    from deeptutor.learning.service import LearningService
+
+    LearningService().record_question_answer(
+        path_id,
+        "wrong",
+        interaction_id=first["question_id"],
+    )
+    before = LearningStore().load(path_id)
+    assert before is not None
+    mastery_before = before.mastery_levels.get(kp_id, 0.0)
+
+    result = await MasterySkipQuestionTool().execute(_mastery_path_id=path_id)
+    skipped = json.loads(result.content)
+    progress = LearningStore().load(path_id)
+    abandoned = LearningStore().get_interaction(path_id, first["question_id"])
+
+    assert result.success is True
+    assert skipped["skipped"] is True
+    assert skipped["question_id"] == first["question_id"]
+    assert skipped["next"]["action"] != "answer_pending"
+    assert progress is not None
+    assert progress.pending_question is None
+    assert progress.quiz_attempts == []
+    assert progress.mastery_levels.get(kp_id, 0.0) == mastery_before
+    assert abandoned is not None
+    assert abandoned.status == InteractionStatus.ABANDONED
+    assert LearningStore().get_active_interaction(path_id) is None
+
+    replacement = json.loads(
+        (
+            await MasteryQuizTool().execute(
+                _mastery_path_id=path_id,
+                knowledge_point_id=kp_id,
+                question="Replacement?",
+                expected_answer="right",
+            )
+        ).content
+    )
+    assert replacement["status"] == "registered"
+    assert replacement["question_id"] != first["question_id"]
+
+
+@pytest.mark.asyncio
+async def test_skip_question_without_open_question_is_no_op(path_id):
+    await _build_basic(path_id)
+    before = LearningStore().load(path_id)
+    assert before is not None
+
+    result = await MasterySkipQuestionTool().execute(_mastery_path_id=path_id)
+    payload = json.loads(result.content)
+    after = LearningStore().load(path_id)
+
+    assert result.success is True
+    assert payload["skipped"] is False
+    assert payload["question_id"] == ""
+    assert after is not None
+    assert after.version == before.version
+
+
+@pytest.mark.asyncio
 async def test_quiz_unknown_kp_fails(path_id):
     await _build_basic(path_id)
     result = await MasteryQuizTool().execute(
@@ -290,6 +365,10 @@ async def test_grade_syncs_mastery_attempt_to_question_bank(path_id, session_sto
     assert entry["user_answer"] == "5"
     assert entry["correct_answer"] == "4"
     assert entry["is_correct"] is False
+    assert entry["source"] == "mastery_path"
+    assert entry["material_id"] == path_id
+    assert entry["section_id"] == kp_id
+    assert entry["section_title"] == "Truth tables"
 
     # An idempotent retry with a changed model argument must not overwrite the
     # committed learner answer in the auxiliary question bank.

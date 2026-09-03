@@ -47,10 +47,18 @@ def note(monkeypatch: pytest.MonkeyPatch):
 def test_windows_note_teaches_powershell_not_heredoc(note, language: str) -> None:
     windows = note(language=language, platform="win32")
     assert "Set-Content" in windows
-    assert "python gen.py" in windows
+    assert "python -m pip" in windows
+    assert "Get-ChildItem" in windows
+    assert "Select-Object" in windows
     # A Bash heredoc as the *instruction* is what breaks on Windows; the note
     # may name it only to tell the model not to use it.
     assert "python - <<'PY'" not in windows
+    for incompatible in ("ls -la", "| head", "| tail", "cd /d"):
+        assert incompatible not in windows
+    if language == "zh":
+        assert "不要把命令语法或依赖错误说成沙箱无权访问" in windows
+    else:
+        assert "Do not describe a syntax or dependency failure as denied sandbox access" in windows
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])

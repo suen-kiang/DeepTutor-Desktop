@@ -38,13 +38,13 @@ from typing import TYPE_CHECKING, Any
 from deeptutor.agents._shared.capability_result import emit_capability_result
 from deeptutor.agents.chat.context_budget import LLMRequestSnapshot
 from deeptutor.agents.chat.dsml_tool_calls import DSMLStreamFilter, extract_dsml_tool_calls
-from deeptutor.core.agentic.messages import assistant_message_with_tool_calls
-from deeptutor.core.agentic.tool_call_stream import ToolCallAccumulator
-from deeptutor.core.agentic.tool_dispatch import DispatchOutcome
-from deeptutor.core.agentic.usage import message_content_chars, record_streamed_usage
 from deeptutor.core.context import UnifiedContext
-from deeptutor.core.stream_bus import StreamBus
 from deeptutor.core.trace import build_trace_metadata, merge_trace_metadata, new_call_id
+from deeptutor.runtime.agentic.messages import assistant_message_with_tool_calls
+from deeptutor.runtime.agentic.tool_call_stream import ToolCallAccumulator
+from deeptutor.runtime.agentic.tool_dispatch import DispatchOutcome
+from deeptutor.runtime.agentic.usage import message_content_chars, record_streamed_usage
+from deeptutor.runtime.stream_bus import StreamBus
 from deeptutor.services.llm import LLMProviderTransportError, clean_thinking_tags
 from deeptutor.services.llm.capabilities import threads_session_id
 from deeptutor.services.llm.multimodal import should_degrade_to_text, strip_image_parts_inplace
@@ -54,6 +54,9 @@ from deeptutor.services.llm.request_compat import (
     is_tool_schema_unsupported,
     is_transient_transport_error,
     logged_error_text,
+)
+from deeptutor.services.session.provider_response_state import (
+    normalize_provider_response_state,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -162,6 +165,8 @@ class AgentLoopState:
 class LLMCallResult:
     text: str
     visible_text: str = ""
+    response_output_items: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = ""
     deferred_chunk_metadata: dict[str, Any] | None = None
@@ -180,6 +185,32 @@ class LoopOutcome:
 
     final_text: str = ""
     completed: bool = False
+    provider_response_state: dict[str, Any] | None = None
+
+
+def _provider_response_state(
+    response_output_items: list[dict[str, Any]],
+    reasoning_content: str,
+) -> dict[str, Any] | None:
+    state: dict[str, Any] = {}
+    if response_output_items:
+        state["responses_output_items"] = response_output_items
+    if reasoning_content:
+        state["reasoning_content"] = reasoning_content
+    return normalize_provider_response_state(state)
+
+
+def _assistant_round_message(result: LLMCallResult) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": result.text}
+    state = _provider_response_state(result.response_output_items, result.reasoning_content)
+    if state is not None:
+        message["_provider_response_state"] = state
+    if result.reasoning_content:
+        # Some chat-completions reasoning models require this field on the
+        # immediately following round. Historical turns rebuild it from the
+        # private provider state instead.
+        message["reasoning_content"] = result.reasoning_content
+    return message
 
 
 class AgentLoop:
@@ -206,8 +237,10 @@ class AgentLoop:
         # the declared parameter types to decode string-marked containers.
         self._tool_schema_catalog = tool_schemas
         self._last_request: LLMRequestSnapshot | None = None
+        self.source = pipeline.event_source
+        self.stage = pipeline.event_stage
 
-    async def run(self) -> None:
+    async def run(self) -> dict[str, Any]:
         state = AgentLoopState()
         # Optional async pre-pass briefings (e.g. explore_context) run BEFORE
         # the answer stage so they form their own preceding activity group and
@@ -215,7 +248,7 @@ class AgentLoop:
         capability_briefing = await self.pipeline._capability_pre_loop_briefings(
             self.context, self.stream
         )
-        async with self.stream.stage(LOOP_STAGE, source="chat"):
+        async with self.stream.stage(self.stage, source=self.source):
             seed_block = await self.pipeline._retrieve_kb_seed_block(self.context, self.stream)
             capability_seed = self.pipeline._capability_pre_loop_seed(self.context)
             seed_block = "\n\n".join(
@@ -238,12 +271,14 @@ class AgentLoop:
                 state=state,
                 checkpoint_boundary=len(messages),
             )
+        if outcome.provider_response_state is not None:
+            self.context.runtime.provider_response_state = outcome.provider_response_state
 
         if state.sources:
             await self.stream.sources(
                 state.sources,
-                source="chat",
-                stage=LOOP_STAGE,
+                source=self.source,
+                stage=self.stage,
                 metadata={"trace_kind": "sources"},
             )
         payload: dict[str, Any] = {
@@ -258,12 +293,14 @@ class AgentLoop:
             budget = self.pipeline.measure_context_budget(self._last_request)
             if budget is not None:
                 payload["metadata"] = {"context_budget": budget}
-        await emit_capability_result(
-            self.stream,
-            payload,
-            source="chat",
-            usage=self.pipeline.usage,
-        )
+        if self.pipeline.emit_result:
+            await emit_capability_result(
+                self.stream,
+                payload,
+                source=self.source,
+                usage=self.pipeline.usage,
+            )
+        return payload
 
     def _clean(self, text: str) -> str:
         return clean_thinking_tags(text, self.pipeline.binding, self.pipeline.model).strip()
@@ -360,14 +397,14 @@ class AgentLoop:
                                 "The model output reached its token limit; asked it to continue."
                             ),
                         ),
-                        source="chat",
-                        stage=LOOP_STAGE,
+                        source=self.source,
+                        stage=self.stage,
                         metadata={"trace_kind": "warning"},
                     )
                     if result.visible_text:
                         continued_answer_parts.append(result.visible_text)
                     if result.text:
-                        messages.append({"role": "assistant", "content": result.text})
+                        messages.append(_assistant_round_message(result))
                     self._append_loop_instruction(
                         messages,
                         self.pipeline._t(
@@ -395,12 +432,12 @@ class AgentLoop:
                                 "asked the model to continue."
                             ),
                         ),
-                        source="chat",
-                        stage=LOOP_STAGE,
+                        source=self.source,
+                        stage=self.stage,
                         metadata={"trace_kind": "warning"},
                     )
                     if result.text:
-                        messages.append({"role": "assistant", "content": result.text})
+                        messages.append(_assistant_round_message(result))
                     self._append_loop_instruction(
                         messages,
                         self.pipeline._t(
@@ -423,7 +460,7 @@ class AgentLoop:
                     if not finish_redirect_used:
                         finish_redirect_used = True
                         if result.text:
-                            messages.append({"role": "assistant", "content": result.text})
+                            messages.append(_assistant_round_message(result))
                         self._append_loop_instruction(messages, finish_redirect)
                         continue
                     await self.stream.progress(
@@ -434,27 +471,68 @@ class AgentLoop:
                                 "Please retry the turn."
                             ),
                         ),
-                        source="chat",
-                        stage=LOOP_STAGE,
+                        source=self.source,
+                        stage=self.stage,
                         metadata={"trace_kind": "warning"},
                     )
                     return LoopOutcome(final_text="", completed=False)
+                final_override = self.pipeline._capability_final_text_override(
+                    self.context, final_text
+                )
+                if final_override is not None:
+                    await self._discard_deferred_output(result)
+                    if not self.context.capability_output.answer_published:
+                        await self.pipeline._emit_protocol_fallback_final_response(
+                            self.stream, final_override
+                        )
+                        self.context.capability_output.answer_published = True
+                    return await self._finalize_finish(
+                        final_override,
+                        continued_answer_parts=continued_answer_parts,
+                        allow_empty=True,
+                    )
                 await self._release_deferred_output(result)
                 # Finish: the text streamed live this round IS the answer.
                 return await self._finalize_finish(
                     final_text,
                     visible_text=result.visible_text,
                     continued_answer_parts=continued_answer_parts,
+                    provider_response_state=_provider_response_state(
+                        result.response_output_items,
+                        result.reasoning_content,
+                    ),
                 )
 
-            await self._release_deferred_output(result)
-            messages.append(assistant_message_with_tool_calls(result.text, result.tool_calls))
+            tool_names = tuple(str(call.get("name") or "") for call in result.tool_calls)
+            output_policy = self.pipeline._capability_tool_round_output_policy(
+                self.context,
+                self._clean(result.text),
+                tool_names,
+            )
+            if output_policy == "discard":
+                await self._discard_deferred_output(result)
+            else:
+                if output_policy == "publish" and result.deferred_completion_metadata is not None:
+                    result.deferred_completion_metadata["answer_visible"] = True
+                await self._release_deferred_output(result)
+            assistant = assistant_message_with_tool_calls(
+                result.text,
+                result.tool_calls,
+                reasoning_content=result.reasoning_content or None,
+            )
+            provider_state = _provider_response_state(
+                result.response_output_items,
+                result.reasoning_content,
+            )
+            if provider_state is not None:
+                assistant["_provider_response_state"] = provider_state
+            messages.append(assistant)
             dispatch = await self.pipeline._dispatch_tool_calls(
                 tool_calls=result.tool_calls,
                 context=self.context,
                 stream=self.stream,
                 iteration_index=state.tool_steps,
-                stage=LOOP_STAGE,
+                stage=self.stage,
             )
             state.tool_steps += 1
             state.sources.extend(dispatch.sources)
@@ -480,6 +558,19 @@ class AgentLoop:
                 checkpoint_boundary=checkpoint_boundary,
             )
 
+            final_override = self.pipeline._capability_final_text_override(self.context, "")
+            if final_override is not None:
+                if not self.context.capability_output.answer_published:
+                    await self.pipeline._emit_protocol_fallback_final_response(
+                        self.stream, final_override
+                    )
+                    self.context.capability_output.answer_published = True
+                return await self._finalize_finish(
+                    final_override,
+                    continued_answer_parts=continued_answer_parts,
+                    allow_empty=True,
+                )
+
             if dispatch.terminate:
                 payload = dispatch.terminate_payload or {}
                 await self.pipeline._emit_terminator_final_response(self.stream, payload)
@@ -499,8 +590,8 @@ class AgentLoop:
                     "before the final answer."
                 ),
             ),
-            source="chat",
-            stage=LOOP_STAGE,
+            source=self.source,
+            stage=self.stage,
             metadata={"trace_kind": "warning"},
         )
         self._append_loop_instruction(
@@ -557,8 +648,8 @@ class AgentLoop:
             )
         await self.stream.progress(
             notice,
-            source="chat",
-            stage=LOOP_STAGE,
+            source=self.source,
+            stage=self.stage,
             metadata={"trace_kind": "warning"},
         )
         self._append_loop_instruction(messages, self.pipeline._finish_exhausted_instruction())
@@ -590,6 +681,10 @@ class AgentLoop:
             result.text,
             visible_text=result.visible_text,
             continued_answer_parts=continued_answer_parts,
+            provider_response_state=_provider_response_state(
+                result.response_output_items,
+                result.reasoning_content,
+            ),
         )
 
     async def _finalize_finish(
@@ -598,6 +693,8 @@ class AgentLoop:
         *,
         visible_text: str | None = None,
         continued_answer_parts: list[str] | None = None,
+        allow_empty: bool = False,
+        provider_response_state: dict[str, Any] | None = None,
     ) -> LoopOutcome:
         cleaned_text = self._clean(raw_text)
         if continued_answer_parts:
@@ -607,7 +704,7 @@ class AgentLoop:
             )
         else:
             final_text = cleaned_text
-        if not final_text:
+        if not final_text and not allow_empty:
             # The finish round produced no usable text; nothing streamed to
             # the user, so emit a fallback answer here.
             final_text = self.pipeline._t(
@@ -618,22 +715,26 @@ class AgentLoop:
                 ),
             )
             await self.pipeline._emit_protocol_fallback_final_response(self.stream, final_text)
-        return LoopOutcome(final_text=final_text, completed=True)
+        return LoopOutcome(
+            final_text=final_text,
+            completed=True,
+            provider_response_state=provider_response_state,
+        )
 
     async def _release_deferred_output(self, result: LLMCallResult) -> None:
         """Publish a buffered capability round only after its protocol accepts it."""
         if result.deferred_chunk_metadata is not None and result.visible_text:
             await self.stream.content(
                 result.visible_text,
-                source="chat",
-                stage=LOOP_STAGE,
+                source=self.source,
+                stage=self.stage,
                 metadata=result.deferred_chunk_metadata,
             )
         if result.deferred_completion_metadata is not None:
             await self.stream.progress(
                 "",
-                source="chat",
-                stage=LOOP_STAGE,
+                source=self.source,
+                stage=self.stage,
                 metadata=result.deferred_completion_metadata,
             )
         result.deferred_chunk_metadata = None
@@ -649,8 +750,8 @@ class AgentLoop:
             metadata["finish_rejected"] = True
             await self.stream.progress(
                 "",
-                source="chat",
-                stage=LOOP_STAGE,
+                source=self.source,
+                stage=self.stage,
                 metadata=metadata,
             )
         result.deferred_chunk_metadata = None
@@ -671,8 +772,8 @@ class AgentLoop:
         tool_choice: str | None = None,
     ) -> LLMCallResult:
         await self.pipeline._guard_context_window(messages, self.stream)
-        stage = LOOP_STAGE
-        call_id = new_call_id(f"chat-{stage}")
+        stage = self.stage
+        call_id = new_call_id(f"{self.source}-{stage}")
         trace_meta = build_trace_metadata(
             call_id=call_id,
             phase=stage,
@@ -684,7 +785,7 @@ class AgentLoop:
         )
         await self.stream.progress(
             label,
-            source="chat",
+            source=self.source,
             stage=stage,
             metadata=merge_trace_metadata(
                 trace_meta,
@@ -741,6 +842,8 @@ class AgentLoop:
             # once, only after a successful attempt.
             usage_seen: Any = None
             text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            response_output_items: list[dict[str, Any]] = []
             tool_acc = ToolCallAccumulator()
             output_chars = 0
             finish_reason = ""
@@ -762,11 +865,11 @@ class AgentLoop:
                             answer_content_emitted = True
                         if not defer_visible_output:
                             await self.stream.content(
-                                segment, source="chat", stage=stage, metadata=chunk_meta
+                                segment, source=self.source, stage=stage, metadata=chunk_meta
                             )
                     else:
                         await self.stream.thinking(
-                            segment, source="chat", stage=stage, metadata=chunk_meta
+                            segment, source=self.source, stage=stage, metadata=chunk_meta
                         )
 
             response_stream = None
@@ -782,6 +885,16 @@ class AgentLoop:
                     choice = choices[0]
                     if getattr(choice, "finish_reason", None):
                         finish_reason = str(choice.finish_reason)
+                    provider_fields = getattr(choice, "provider_specific_fields", None)
+                    if isinstance(provider_fields, dict):
+                        native_items = provider_fields.get("native_output_items")
+                        if isinstance(native_items, list) and any(
+                            isinstance(item, dict) and item.get("type") == "reasoning"
+                            for item in native_items
+                        ):
+                            response_output_items = [
+                                dict(item) for item in native_items if isinstance(item, dict)
+                            ]
                     delta = getattr(choice, "delta", None)
                     if delta is None:
                         continue
@@ -792,10 +905,11 @@ class AgentLoop:
                         None,
                     )
                     if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
                         output_chars += len(reasoning_text)
                         output_emitted = True
                         await self.stream.thinking(
-                            reasoning_text, source="chat", stage=stage, metadata=chunk_meta
+                            reasoning_text, source=self.source, stage=stage, metadata=chunk_meta
                         )
 
                     content = getattr(delta, "content", None)
@@ -827,7 +941,7 @@ class AgentLoop:
                             "notices.provider_retry",
                             default="The model provider connection was interrupted; retrying.",
                         ),
-                        source="chat",
+                        source=self.source,
                         stage=stage,
                         metadata=merge_trace_metadata(
                             trace_meta,
@@ -844,7 +958,7 @@ class AgentLoop:
                 partial_response = output_emitted
                 await self.stream.progress(
                     "",
-                    source="chat",
+                    source=self.source,
                     stage=stage,
                     metadata=merge_trace_metadata(
                         trace_meta,
@@ -969,13 +1083,15 @@ class AgentLoop:
         if not defer_visible_output:
             await self.stream.progress(
                 "",
-                source="chat",
+                source=self.source,
                 stage=stage,
                 metadata=completion_event_metadata,
             )
         return LLMCallResult(
             text=text,
             visible_text="".join(visible_text_parts),
+            response_output_items=response_output_items,
+            reasoning_content="".join(reasoning_parts),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             deferred_chunk_metadata=chunk_meta if defer_visible_output else None,
@@ -1010,7 +1126,7 @@ class AgentLoop:
                         "notices.tool_schema_fallback",
                         default="Provider rejected native tool schemas; retrying without tools.",
                     ),
-                    source="chat",
+                    source=self.source,
                     stage=stage,
                     metadata=merge_trace_metadata(
                         trace_meta,
@@ -1037,7 +1153,7 @@ class AgentLoop:
                         "notices.image_fallback",
                         default="Model does not support image input; retrying without images.",
                     ),
-                    source="chat",
+                    source=self.source,
                     stage=stage,
                     metadata=merge_trace_metadata(
                         trace_meta,

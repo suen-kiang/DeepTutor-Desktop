@@ -1,7 +1,8 @@
 """Subagent connections API.
 
 Backs the "My Agents → connected agents" feature: detect which local agent CLIs
-(Claude Code, Codex, Gemini CLI, Kimi CLI, opencode, MiMo Code) are installed on
+(Claude Code, Codex, Antigravity CLI, Kimi CLI, opencode, MiMo Code, Hermes Agent,
+OpenClaw, DeepSeek Harness) are installed on
 this machine, connect one as a pointer KB the chat composer can select, and
 configure the consult budget. Connections are
 stored as ``type: subagent`` knowledge bases (per-user, via the KB manager), so
@@ -99,7 +100,7 @@ async def list_visible_partners():
     """Partners the current user can connect & consult.
 
     Returns every partner for an admin, or just the ones an admin has assigned
-    for a non-admin. The partner CRUD API (``/api/v1/partners``) stays fully
+    for a non-admin. The partner CRUD API (``/api/partners``) stays fully
     admin-gated; this is the read surface the connect flow and the partner list
     page use, so a non-admin sees their assigned partners without a 403.
     """
@@ -293,7 +294,8 @@ async def message_connection(name: str, payload: SubagentMessageRequest):
                     break
         finally:
             if not task.done():
-                await task
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 

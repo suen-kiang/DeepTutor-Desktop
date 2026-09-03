@@ -4,12 +4,14 @@ export interface KnowledgeUploadPolicy {
   extensions: string[];
   accept: string;
   max_file_size_bytes: number;
+  allow_any_extension?: boolean;
 }
 
 export const DEFAULT_UPLOAD_POLICY: KnowledgeUploadPolicy = {
   extensions: [],
   accept: "",
   max_file_size_bytes: 200 * 1024 * 1024,
+  allow_any_extension: false,
 };
 
 const PAGEINDEX_UPLOAD_EXTENSIONS: Record<string, string[]> = {
@@ -35,7 +37,12 @@ export function uploadPolicyForProvider(
 ): KnowledgeUploadPolicy {
   const extensions = PAGEINDEX_UPLOAD_EXTENSIONS[provider || ""];
   return extensions
-    ? { ...policy, extensions, accept: extensions.join(",") }
+    ? {
+        ...policy,
+        extensions,
+        accept: extensions.join(","),
+        allow_any_extension: false,
+      }
     : policy;
 }
 
@@ -116,7 +123,7 @@ export interface KnowledgeBase {
     vault_path?: string;
     /** SQLite store of a connected MarginNote 4 library (when type === "marginnote4"). */
     db_path?: string;
-    /** Backend of a connected subagent (when type === "subagent"): "claude_code" | "codex" | "gemini" | "antigravity" | "kimi" | "opencode" | "mimo" | "partner". */
+    /** Backend of a connected subagent (when type === "subagent"): "claude_code" | "codex" | "antigravity" | "kimi" | "opencode" | "mimo" | "hermes" | "openclaw" | "deepseek_harness" | "partner". */
     agent_kind?: string;
     /** Bound partner id when agent_kind === "partner". */
     partner_id?: string;
@@ -142,7 +149,11 @@ export interface KnowledgeBase {
   available?: boolean;
 }
 
-export type ProviderConnectionStatus = "ready" | "needs_key" | "unavailable";
+export type ProviderConnectionStatus =
+  | "ready"
+  | "needs_key"
+  | "needs_setup"
+  | "unavailable";
 
 export const providerUsesEmbeddingMetadata = (provider?: string): boolean =>
   provider !== "pageindex" && provider !== "pageindex-oss";
@@ -151,7 +162,9 @@ export const providerConnectionStatus = (provider: {
   id: string;
   configured?: boolean;
   requires_api_key?: boolean;
+  setup_required?: boolean;
 }): ProviderConnectionStatus => {
+  if (provider.setup_required) return "needs_setup";
   if (provider.requires_api_key && provider.configured === false)
     return "needs_key";
   if (provider.configured === false) return "unavailable";
@@ -182,7 +195,19 @@ export const formatFileSize = (bytes: number): string => {
   return `${bytes} B`;
 };
 
-export const getFileExtension = (filename: string): string => {
+export const getFileExtension = (
+  filename: string,
+  allowedExtensions: Iterable<string> = [],
+): string => {
+  const lowerName = filename.toLowerCase();
+  const matches = Array.from(allowedExtensions, (extension) =>
+    extension.toLowerCase(),
+  ).filter((extension) => lowerName.endsWith(extension));
+  if (matches.length > 0) {
+    return matches.reduce((longest, extension) =>
+      extension.length > longest.length ? extension : longest,
+    );
+  }
   const index = filename.lastIndexOf(".");
   return index >= 0 ? filename.slice(index).toLowerCase() : "";
 };
@@ -214,6 +239,18 @@ export const formatKnowledgeTimestamp = (value?: string): string | null => {
 };
 
 export const MARGINNOTE4_KB_TYPE = "marginnote4";
+
+/**
+ * A connected subagent (partner or local CLI), reachable live via
+ * `consult_subagent`. It owns no documents and nothing to retrieve, so any
+ * picker that feeds static context into a generation step (Mastery topic
+ * sources, Book sources) must exclude it — unlike the chat composer's
+ * "attach knowledge" picker, where surfacing it is the point.
+ */
+export const SUBAGENT_KB_TYPE = "subagent";
+
+export const isSubagentKb = (kb: KnowledgeBase): boolean =>
+  kb.metadata?.type === SUBAGENT_KB_TYPE;
 
 /**
  * A connected MarginNote 4 library.
@@ -311,9 +348,9 @@ export const resolveKnowledgeIndexFailure = (
     retryable: progress?.retryable ?? storedProgress?.retryable,
     requiresModelChange: requiresEmbeddingChange || requiresCompletionChange,
     settingsHref: requiresEmbeddingChange
-      ? "/settings/embedding"
+      ? "/settings#embedding"
       : requiresCompletionChange
-        ? "/settings/models"
+        ? "/settings#models"
         : undefined,
   };
 };
@@ -382,10 +419,14 @@ export function validateFiles(
   );
 
   const items = files.map((file) => {
-    const extension = getFileExtension(file.name);
+    const extension = getFileExtension(file.name, allowedExtensions);
     let error: string | null = null;
 
-    if (allowedExtensions.size > 0 && !allowedExtensions.has(extension)) {
+    if (
+      !uploadPolicy.allow_any_extension &&
+      allowedExtensions.size > 0 &&
+      !allowedExtensions.has(extension)
+    ) {
       error = t("Unsupported file type");
     } else if (file.size > uploadPolicy.max_file_size_bytes) {
       error = t("This file exceeds the maximum size of {{size}}.", {

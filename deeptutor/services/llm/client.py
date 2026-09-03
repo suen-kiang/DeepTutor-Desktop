@@ -25,19 +25,22 @@ class LLMClient:
     Prefer using factory functions (complete, stream) directly for new code.
     """
 
-    def __init__(self, config: LLMConfig | None = None) -> None:
+    def __init__(self, config: LLMConfig | None = None, *, configure_env: bool = True) -> None:
         """
         Initialize LLM client.
 
         Args:
             config: LLM configuration. If None, loads from environment.
+            configure_env: Keep true for the legacy singleton facade; isolated
+                override clients should not mutate process-wide SDK settings.
         """
 
         self.config = config or get_llm_config()
         self.logger = logging.getLogger(__name__)
 
         # Keep OPENAI_* env vars aligned for libraries that still read from env.
-        self._setup_openai_env_vars()
+        if configure_env:
+            self._setup_openai_env_vars()
 
     def _setup_openai_env_vars(self) -> None:
         """
@@ -244,7 +247,7 @@ def reset_llm_client() -> None:
 
     reset_runtime_provider_pool()
     try:
-        from deeptutor.core.agentic.client import reset_agentic_client_pool
+        from deeptutor.runtime.agentic.client import reset_agentic_client_pool
 
         reset_agentic_client_pool()
     except ImportError:

@@ -29,19 +29,19 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Callable
 
-from deeptutor.core.agentic import (
+from deeptutor.core.context import UnifiedContext
+from deeptutor.core.trace import build_trace_metadata, merge_trace_metadata, new_call_id
+from deeptutor.runtime.agentic import (
     LLMClientConfig,
     build_completion_kwargs,
     build_openai_client,
     can_use_native_tool_calling,
     dispatch_tool_calls,
 )
-from deeptutor.core.agentic.messages import assistant_message_with_tool_calls
-from deeptutor.core.agentic.tool_call_stream import ToolCallAccumulator
-from deeptutor.core.context import UnifiedContext
-from deeptutor.core.stream_bus import StreamBus
-from deeptutor.core.trace import build_trace_metadata, merge_trace_metadata, new_call_id
+from deeptutor.runtime.agentic.messages import assistant_message_with_tool_calls
+from deeptutor.runtime.agentic.tool_call_stream import ToolCallAccumulator
 from deeptutor.runtime.registry.tool_registry import get_tool_registry
+from deeptutor.runtime.stream_bus import StreamBus
 from deeptutor.services.llm import clean_thinking_tags, get_llm_config, get_token_limit_kwargs
 from deeptutor.services.llm import stream as llm_stream
 from deeptutor.services.llm.capabilities import threads_session_id
@@ -74,6 +74,7 @@ _KIND_BY_PREFIX: dict[str, tuple[str, str]] = {
     "hs-": ("Conversation transcript", "对话记录"),
     "nb-": ("Notebook record", "笔记本记录"),
     "bk-": ("Book excerpt", "书籍节选"),
+    "rd-": ("Reading excerpt", "阅读材料节选"),
     "qb-": ("Question-bank entry", "题库条目"),
     "at-": ("Document", "文档"),
 }
@@ -109,6 +110,8 @@ class ContextExplorer:
             api_version=self.api_version,
             extra_headers=self.extra_headers or None,
             reasoning_effort=self.reasoning_effort,
+            wire_api=getattr(cfg, "wire_api", None) or "auto",
+            api_format=getattr(cfg, "api_format", None) or "auto",
         )
 
     async def investigate(

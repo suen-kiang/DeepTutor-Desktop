@@ -25,6 +25,7 @@ from deeptutor.knowledge.kb_types import (
     MARGINNOTE4_KB_TYPE,
     OBSIDIAN_KB_TYPE,
     SUBAGENT_KB_TYPE,
+    WEKNORA_KB_TYPE,
     external_root_of,
     is_connected_kb,
 )
@@ -37,6 +38,7 @@ from deeptutor.services.rag.factory import (
     LIGHTRAG_SERVER_PROVIDER,
     PAGEINDEX_OSS_PROVIDER,
     PAGEINDEX_PROVIDER,
+    WEKNORA_PROVIDER,
     has_ready_provider_index,
     normalize_provider_name,
     provider_uses_embedding_versions,
@@ -1028,6 +1030,50 @@ class KnowledgeBaseManager:
         self._save_config()
         return entry
 
+    def register_weknora_kb(
+        self,
+        name: str,
+        server_url: str,
+        api_key: str,
+        knowledge_base_id: str,
+        *,
+        description: str = "",
+    ) -> dict:
+        """Register a self-hosted WeKnora knowledge base as a pointer KB."""
+        name = (name or "").strip()
+        server_url = (server_url or "").strip().rstrip("/")
+        api_key = (api_key or "").strip()
+        knowledge_base_id = (knowledge_base_id or "").strip()
+        if not name:
+            raise ValueError("Knowledge base name is required.")
+        if not server_url or not knowledge_base_id:
+            raise ValueError("WeKnora server URL and knowledge base ID are required.")
+        if not api_key:
+            raise ValueError("A WeKnora API key is required.")
+
+        self.config = self._load_config()
+        knowledge_bases = self.config.setdefault("knowledge_bases", {})
+        if name in knowledge_bases:
+            raise ValueError(f"A knowledge base named '{name}' already exists.")
+
+        now = datetime.now().isoformat()
+        entry: dict[str, Any] = {
+            "path": name,
+            "type": WEKNORA_KB_TYPE,
+            "rag_provider": WEKNORA_PROVIDER,
+            "server_url": server_url,
+            "api_key": api_key,
+            "knowledge_base_id": knowledge_base_id,
+            "description": description or f"WeKnora knowledge base: {name}",
+            "status": "ready",
+            "needs_reindex": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        knowledge_bases[name] = entry
+        self._save_config()
+        return entry
+
     def get_knowledge_base_path(self, name: str | None = None) -> Path:
         """Get path to a knowledge base.
 
@@ -1799,16 +1845,7 @@ class KnowledgeBaseManager:
             raise ValueError(f"Linked folder not found: {folder_id}")
 
         folder_path = Path(folder_info["path"]).expanduser().resolve()
-        last_sync = folder_info.get("last_sync")
         synced_files = folder_info.get("synced_files", {})
-
-        # Parse last sync timestamp
-        last_sync_time = None
-        if last_sync:
-            try:
-                last_sync_time = datetime.fromisoformat(last_sync)
-            except Exception:
-                pass
 
         new_files = []
         modified_files = []

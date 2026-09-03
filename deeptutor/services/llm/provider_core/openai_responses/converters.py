@@ -6,6 +6,10 @@ from collections.abc import Mapping
 import json
 from typing import Any
 
+from deeptutor.services.session.provider_response_state import (
+    normalize_provider_response_state,
+)
+
 _CHAT_TOKEN_LIMIT_ALIASES = ("max_completion_tokens", "max_tokens")
 
 
@@ -27,6 +31,18 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
             continue
 
         if role == "assistant":
+            state = normalize_provider_response_state(msg.get("_provider_response_state"))
+            state_items = state.get("responses_output_items") if state is not None else None
+            if not isinstance(state_items, list):
+                legacy_state = normalize_provider_response_state(
+                    {"responses_output_items": msg.get("_responses_output_items")}
+                )
+                state_items = (
+                    legacy_state.get("responses_output_items") if legacy_state is not None else None
+                )
+            if isinstance(state_items, list) and state_items:
+                input_items.extend(dict(item) for item in state_items if isinstance(item, dict))
+                continue
             if isinstance(content, str) and content:
                 input_items.append(
                     {

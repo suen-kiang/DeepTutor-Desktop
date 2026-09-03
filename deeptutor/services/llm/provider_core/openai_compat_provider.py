@@ -13,7 +13,6 @@ import secrets
 import string
 import time
 from typing import TYPE_CHECKING, Any
-import uuid
 
 import json_repair
 from openai import AsyncOpenAI
@@ -21,7 +20,7 @@ from openai import AsyncOpenAI
 from deeptutor.services.keypool import KeyPool
 from deeptutor.services.llm.capabilities import disable_response_format_at_runtime
 from deeptutor.services.llm.exceptions import LLMConfigError
-from deeptutor.services.llm.openai_http_client import openai_client_kwargs
+from deeptutor.services.llm.openai_http_client import openai_sdk_client_kwargs
 from deeptutor.services.llm.provider_core.base import LLMProvider, LLMResponse, ToolCallRequest
 from deeptutor.services.llm.provider_core.openai_responses import (
     adapt_chat_kwargs_to_responses,
@@ -33,11 +32,15 @@ from deeptutor.services.llm.provider_core.openai_responses import (
 from deeptutor.services.llm.reasoning_params import (
     build_openai_compatible_reasoning_kwargs,
 )
+from deeptutor.services.llm.request_compat import is_response_format_unsupported
 from deeptutor.services.llm.usage_frame import token_counts
-from deeptutor.services.provider_registry import model_overrides_for
+from deeptutor.services.provider_registry import model_overrides_for, normalize_wire_api
+from deeptutor.services.session.provider_response_state import (
+    normalize_provider_response_state,
+)
 
 if TYPE_CHECKING:
-    from deeptutor.services.provider_registry import ProviderSpec
+    pass
 
 _ALLOWED_MSG_KEYS = frozenset(
     {
@@ -48,14 +51,14 @@ _ALLOWED_MSG_KEYS = frozenset(
         "name",
         "reasoning_content",
         "extra_content",
+        "_provider_response_state",
+        "_responses_output_items",
     }
 )
 _ALNUM = string.ascii_letters + string.digits
 
-_DEFAULT_OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/HKUDS/DeepTutor",
-    "X-OpenRouter-Title": "DeepTutor",
-}
+_INTERNAL_RESPONSE_STATE_KEYS = frozenset({"_provider_response_state", "_responses_output_items"})
+
 _RESPONSES_FAILURE_THRESHOLD = 2
 _RESPONSES_PROBE_INTERVAL_S = 300.0
 
@@ -84,10 +87,17 @@ def _coerce_dict(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _uses_openrouter(spec: "ProviderSpec | None", api_base: str | None) -> bool:
-    if spec and spec.name == "openrouter":
-        return True
-    return bool(api_base and "openrouter" in api_base.lower())
+def _provider_state_output_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+    state = normalize_provider_response_state(message.get("_provider_response_state"))
+    items = state.get("responses_output_items") if state is not None else None
+    if not isinstance(items, list):
+        legacy_state = normalize_provider_response_state(
+            {"responses_output_items": message.get("_responses_output_items")}
+        )
+        items = legacy_state.get("responses_output_items") if legacy_state is not None else None
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
 
 
 def _is_direct_openai_base(api_base: str | None) -> bool:
@@ -122,6 +132,7 @@ class OpenAICompatProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
         spec: Any = None,
         provider_name: str | None = None,
+        wire_api: str = "auto",
     ):
         keys = api_key if isinstance(api_key, list) else [api_key]
         keys = [str(key).strip() for key in keys if str(key or "").strip()]
@@ -132,6 +143,7 @@ class OpenAICompatProvider(LLMProvider):
         self.extra_headers = extra_headers or {}
         self._spec = spec
         self._provider_name = provider_name
+        self._wire_api = normalize_wire_api(wire_api)
 
         if primary_key and spec and spec.env_key:
             self._setup_env(primary_key, api_base)
@@ -151,18 +163,14 @@ class OpenAICompatProvider(LLMProvider):
                 "OpenAI API key is not configured. Set it in Settings > Catalog, "
                 "or select a local provider such as Ollama."
             )
-        default_headers: dict[str, str] = {"x-session-affinity": uuid.uuid4().hex}
-        if _uses_openrouter(spec, effective_base):
-            default_headers.update(_DEFAULT_OPENROUTER_HEADERS)
-        if extra_headers:
-            default_headers.update(extra_headers)
-
         self._client = AsyncOpenAI(
-            api_key=primary_key or "no-key",
-            base_url=effective_base,
-            default_headers=default_headers,
-            max_retries=0,
-            **openai_client_kwargs(),
+            **openai_sdk_client_kwargs(
+                api_key=primary_key or "no-key",
+                base_url=effective_base,
+                extra_headers=extra_headers,
+                spec=spec,
+                sdk_max_retries=0,
+            )
         )
         self._responses_failures: dict[str, int] = {}
         self._responses_tripped_at: dict[str, float] = {}
@@ -262,8 +270,47 @@ class OpenAICompatProvider(LLMProvider):
             return tool_call_id
         return hashlib.sha256(tool_call_id.encode()).hexdigest()[:9]
 
-    def _sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
+    def _sanitize_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        responses_api: bool = False,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                prepared.append(message)
+                continue
+            clean = {
+                key: value
+                for key, value in message.items()
+                if key not in _INTERNAL_RESPONSE_STATE_KEYS
+            }
+            if responses_api:
+                output_items = _provider_state_output_items(message)
+                if output_items:
+                    clean["_provider_response_state"] = {"responses_output_items": output_items}
+            else:
+                state = normalize_provider_response_state(message.get("_provider_response_state"))
+                reasoning_content = state.get("reasoning_content") if state is not None else None
+                if (
+                    isinstance(reasoning_content, str)
+                    and reasoning_content
+                    and model
+                    and "deepseek" in model.lower()
+                ):
+                    clean["reasoning_content"] = reasoning_content
+            prepared.append(clean)
+
+        sanitized = LLMProvider._sanitize_request_messages(prepared, _ALLOWED_MSG_KEYS)
+        if responses_api:
+            # Responses function calls use the provider-issued ``call_id`` as
+            # a protocol identity. The converter splits DeepTutor's compound
+            # ``call_id|item_id`` form itself; hashing it here would make the
+            # later function_call_output point at a different call than the
+            # replayed native function_call item.
+            return sanitized
         id_map: dict[str, str] = {}
 
         def map_id(value: Any) -> Any:
@@ -322,7 +369,9 @@ class OpenAICompatProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model_name,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages)),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages), model=model_name
+            ),
         }
 
         if self._supports_temperature(model_name, reasoning_effort):
@@ -362,6 +411,11 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None,
         tools: list[dict[str, Any]] | None = None,
     ) -> bool:
+        if self._wire_api == "responses":
+            return True
+        if self._wire_api == "chat_completions":
+            return False
+
         spec = self._spec
         if self._uses_native_web_search(model, tools):
             return self._responses_circuit_allows(model, reasoning_effort)
@@ -457,20 +511,7 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _is_response_format_error(exc: Exception) -> bool:
-        text = str(getattr(exc, "body", None) or getattr(exc, "message", None) or exc).lower()
-        if "response_format" not in text and "response format" not in text:
-            return False
-        return any(
-            marker in text
-            for marker in (
-                "not supported",
-                "unsupported",
-                "json_object",
-                "json_schema",
-                "must be 'json_schema' or 'text'",
-                "specified for 'response_format.type' is not valid",
-            )
-        )
+        return is_response_format_unsupported(exc)
 
     def _build_responses_body(
         self,
@@ -487,7 +528,9 @@ class OpenAICompatProvider(LLMProvider):
             model_name = model_name.split("/")[-1]
 
         instructions, input_items = convert_messages(
-            self._sanitize_messages(self._sanitize_empty_content(messages))
+            self._sanitize_messages(
+                self._sanitize_empty_content(messages), responses_api=True, model=model_name
+            )
         )
         body: dict[str, Any] = {
             "model": model_name,
@@ -764,6 +807,8 @@ class OpenAICompatProvider(LLMProvider):
                 except Exception as responses_error:
                     if self._spec and self._spec.name == "github_copilot":
                         raise
+                    if self._wire_api == "responses":
+                        raise
                     if not self._should_fallback_from_responses_error(responses_error):
                         raise
                     self._record_responses_failure(model, reasoning_effort)
@@ -889,6 +934,12 @@ class OpenAICompatProvider(LLMProvider):
                         on_reasoning_delta=on_reasoning_delta,
                         on_provider_event=_collect_provider_event,
                     )
+                    if not any(item.get("type") == "reasoning" for item in native_output_items):
+                        native_output_items = [
+                            item
+                            for item in native_output_items
+                            if item.get("type") in {"web_search_call", "web_search"}
+                        ]
                     self._record_responses_success(model, reasoning_effort)
                     return LLMResponse(
                         content=content or None,
@@ -907,6 +958,8 @@ class OpenAICompatProvider(LLMProvider):
                     )
                 except Exception as responses_error:
                     if self._spec and self._spec.name == "github_copilot":
+                        raise
+                    if self._wire_api == "responses":
                         raise
                     if not self._should_fallback_from_responses_error(responses_error):
                         raise

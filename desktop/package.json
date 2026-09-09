@@ -1,6 +1,6 @@
 {
   "name": "deeptutor-desktop",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "DeepTutor macOS 桌面应用封装（Electron 壳，不改动官方源码）",
   "main": "main.js",
   "author": "DeepTutor Desktop",
